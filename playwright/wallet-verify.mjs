@@ -1,0 +1,15 @@
+import { chromium } from "playwright";
+const b = await chromium.launch({ headless: true });
+const p = await (await b.newContext({ viewport:{width:1280,height:800} })).newPage();
+const errs=[], walletReqs=[];
+p.on("pageerror",e=>errs.push("pageerror: "+e.message.slice(0,160)));
+p.on("console",m=>{ if(m.type()==="error") errs.push("console.error: "+m.text().slice(0,160)); });
+p.on("request",r=>{ const u=r.url(); if(/3001|\/wallet\/|\/api\/accounts/.test(u)) walletReqs.push(r.method()+" "+u); });
+await p.goto("https://gateway.imagineering.cc/", { waitUntil:"networkidle", timeout:30000 }).catch(e=>errs.push("goto: "+e.message));
+await p.waitForTimeout(4000);
+await p.screenshot({ path:"/tmp/gw-wallet-after.png" });
+console.log("wallet-related requests:\n  "+(walletReqs.length?walletReqs.join("\n  "):"(none on initial load)"));
+const localhostErr = errs.filter(e=>/localhost:3001|loopback/i.test(e));
+console.log("\nlocalhost:3001 / loopback errors: "+(localhostErr.length?("PRESENT\n  "+localhostErr.join("\n  ")):"NONE ✅"));
+console.log("\nall console errors:\n  "+(errs.length?errs.join("\n  "):"none"));
+await b.close();

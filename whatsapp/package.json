@@ -1,0 +1,12 @@
+{
+  "name": "whatsapp-cli",
+  "version": "0.2.0",
+  "type": "module",
+  "private": true,
+  "bin": { "whatsapp-cli": "./whatsapp.mjs" },
+  "dependencies": {
+    "baileys": "^7.0.0-rc11",
+    "qrcode-terminal": "^0.12.0",
+    "pino": "^9.0.0"
+  }
+}

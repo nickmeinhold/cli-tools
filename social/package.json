@@ -1,0 +1,8 @@
+{
+  "name": "social-cli",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "bin": { "social": "./social.mjs" },
+  "description": "Harvest your social graph (LinkedIn connections, Facebook friends) into structured records for the community graph, via authenticated internal APIs."
+}

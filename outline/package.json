@@ -1,0 +1,12 @@
+{
+  "name": "@enspyr/outline-cli",
+  "version": "0.1.0",
+  "description": "CLI for the Outline (getoutline.com) API — matching the gmail/gdrive cli-tools pattern.",
+  "type": "module",
+  "bin": {
+    "outline": "./outline.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

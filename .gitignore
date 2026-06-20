@@ -1,0 +1,32 @@
+# ── Secrets & live sessions — NEVER commit ──────────────────────────────────
+.tokens/
+.state/
+**/*.session
+**/storageState.json
+**/appstate*.json
+auth_info*/
+*-creds.json
+
+# ── Captured / personal data ────────────────────────────────────────────────
+corpus.jsonl
+corpus_state.json
+reply_state.json
+nick_chat_state.json
+nick-dossier.txt
+nick-dossier.draft.txt
+system-prompt.txt        # provide your own; see system-prompt.txt.example
+seen.json
+*.ndjson
+cursor
+hwm
+
+# ── Runtime noise ───────────────────────────────────────────────────────────
+node_modules/
+__pycache__/
+*.pyc
+*.log
+*.err
+*.pid
+*.bak
+.DS_Store
+*.plist
