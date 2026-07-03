@@ -69,6 +69,7 @@ and a `claude` CLI on PATH for the AI-backed tools (`imessage-responder`).
 | [`signal`](#signal) | Read (local DB) + send Signal | Signal Desktop DB + signal-cli | personal |
 | [`messenger`](#messenger) | Read/send Facebook Messenger DMs | ws3-fca + Playwright | ⚠️ unofficial |
 | [`instagram`](#instagram) | Read/send Instagram DMs | Playwright (web) | ⚠️ unofficial |
+| [`linkedin`](#linkedin) | Read/send LinkedIn DMs | Playwright (web) | ⚠️ unofficial |
 | [`google`](#google) | Gmail, Drive, Calendar | Google APIs (OAuth) | ✅ official |
 | [`blender`](#blender) | Drive Blender programmatically | BlenderMCP socket / headless | ✅ |
 | [`outline`](#outline) | Outline wiki CRUD + search | Outline API | ✅ official |
@@ -126,6 +127,16 @@ Instagram DMs as you. IG's private API is blocked, so this drives a headless
 browser (slower/heavier, but the only path IG leaves open). Interactive login.
 ```bash
 node instagram/instagram.mjs --help
+```
+
+### linkedin
+LinkedIn DMs as you. LinkedIn has no messaging API, and its internal Voyager
+REST endpoint now 500s (DMs moved to a GraphQL endpoint with a rotating query
+hash), so this drives the messaging SPA headlessly and reads the DOM. Reuses a
+saved Playwright session. `send` fails closed on unknown flags; `--dry-run`
+opens the thread but sends nothing.
+```bash
+node linkedin/linkedin.mjs --help
 ```
 
 ### google
