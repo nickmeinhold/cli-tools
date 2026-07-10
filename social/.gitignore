@@ -1,0 +1,7 @@
+# Personal data — never sync to the public cli-tools mirror.
+# discover-ignore.txt holds real contact identifiers (handles, phone-ids) Nick
+# has dismissed from discovery.
+discover-ignore.txt
+
+node_modules/
+.tokens/

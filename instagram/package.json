@@ -1,0 +1,13 @@
+{
+  "name": "instagram-cli",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Read/send Instagram DMs as Nick's account, headless via instagram-private-api (the Baileys-equivalent for IG).",
+  "bin": {
+    "instagram": "./instagram.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.60.0"
+  }
+}

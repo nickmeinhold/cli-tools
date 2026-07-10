@@ -1,0 +1,10 @@
+{
+  "name": "telegram-cli",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "bin": { "telegram": "./telegram.mjs" },
+  "dependencies": {
+    "telegram": "^2.22.2"
+  }
+}

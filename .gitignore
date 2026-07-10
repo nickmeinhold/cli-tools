@@ -1,0 +1,32 @@
+# === secrets / credentials (NEVER commit) ===
+.tokens/
+*.token
+*.credentials.txt
+**/session-*.json
+.env
+.env.*
+
+# === PII / runtime state ===
+**/corpus*.jsonl
+**/*_state.json
+**/nick_chat*.json
+**/reply_state.json
+.state/
+**/.state/
+
+# === logs ===
+*.log
+**/launchd*.log
+**/*.err
+**/*.out
+
+# === dependencies / build ===
+node_modules/
+dist/
+build/
+.DS_Store
+
+# runtime dedup/seen state
+**/seen.json
+**/*.seen.json
+**/watch_state.json

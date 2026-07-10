@@ -1,0 +1,54 @@
+diff --git a/node_modules/ws3-fca/src/deltas/apis/threads/getThreadList.js b/node_modules/ws3-fca/src/deltas/apis/threads/getThreadList.js
+index 83c1d02..d07fa5d 100644
+--- a/node_modules/ws3-fca/src/deltas/apis/threads/getThreadList.js
++++ b/node_modules/ws3-fca/src/deltas/apis/threads/getThreadList.js
+@@ -65,8 +65,8 @@ function formatThreadGraphQLResponse(messageThread) {
+       firstName: d.node.messaging_actor.short_name,
+       vanity: d.node.messaging_actor.username,
+       url: d.node.messaging_actor.url,
+-      thumbSrc: d.node.messaging_actor.big_image_src.uri,
+-      profileUrl: d.node.messaging_actor.big_image_src.uri,
++      thumbSrc: d.node.messaging_actor.big_image_src?.uri || null,
++      profileUrl: d.node.messaging_actor.big_image_src?.uri || null,
+       gender: d.node.messaging_actor.gender,
+       type: d.node.messaging_actor.__typename,
+       isFriend: d.node.messaging_actor.is_viewer_friend,
+diff --git a/node_modules/ws3-fca/src/utils/clients.js b/node_modules/ws3-fca/src/utils/clients.js
+index 548b15f..53f4889 100644
+--- a/node_modules/ws3-fca/src/utils/clients.js
++++ b/node_modules/ws3-fca/src/utils/clients.js
+@@ -38,7 +38,7 @@ function parseAndCheckLogin(ctx, http, retryCount = 0) {
+ 
+       await delay(retryTime);
+ 
+-      if (data.request.headers["content-type"].split(";")[0] === "multipart/form-data") {
++      if ((data.request.headers["content-type"] || "").split(";")[0] === "multipart/form-data") {
+         const newData = await http.postFormData(
+           url,
+           ctx.jar,
+@@ -128,11 +128,20 @@ function saveCookies(jar) {
+   return function (res) {
+     const cookies = res.headers["set-cookie"] || [];
+     cookies.forEach(function (c) {
+-      if (c.indexOf(".facebook.com") > -1) {
+-        jar.setCookie(c, "https://www.facebook.com");
+-      }
+-      const c2 = c.replace(/domain=\.facebook\.com/, "domain=.messenger.com");
+-      jar.setCookie(c2, "https://www.messenger.com");
++      // Defensive: FB also returns host-scoped (www.facebook.com) cookies, not just
++      // domain-scoped (.facebook.com) ones. Guard each write and only mirror genuine
++      // .facebook.com cookies onto messenger.com, so one odd cookie can't kill login.
++      try {
++        if (c.indexOf(".facebook.com") > -1) {
++          jar.setCookie(c, "https://www.facebook.com");
++        }
++      } catch (e) {}
++      try {
++        if (/domain=\.facebook\.com/i.test(c)) {
++          const c2 = c.replace(/domain=\.facebook\.com/i, "domain=.messenger.com");
++          jar.setCookie(c2, "https://www.messenger.com");
++        }
++      } catch (e) {}
+     });
+     return res;
+   };

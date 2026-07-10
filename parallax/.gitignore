@@ -1,0 +1,2 @@
+# Runtime artifacts — regenerable, never tracked.
+.state/

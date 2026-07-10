@@ -1,0 +1,13 @@
+{
+  "name": "linkedin-cli",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Read/send LinkedIn DMs as your account, headless via Playwright (linkedin.com web). LinkedIn has no messaging API and its internal Voyager REST endpoint 500s, so this drives the messaging SPA and reads the DOM.",
+  "bin": {
+    "linkedin": "./linkedin.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.60.0"
+  }
+}

@@ -1,0 +1,17 @@
+import { chromium } from "playwright";
+import { join } from "node:path"; import { homedir } from "node:os";
+const storage = join(homedir(), ".claude", "cli-tools", ".tokens", "playwright", "asc.json");
+const b = await chromium.launch({ headless: true });
+const ctx = await b.newContext({ storageState: storage, viewport: { width: 1400, height: 950 } });
+const page = await ctx.newPage();
+await page.goto("https://developer.apple.com/account", { waitUntil: "domcontentloaded" });
+await page.waitForTimeout(9000);
+const txt = await page.evaluate(() => document.body.innerText.replace(/\s+/g, " "));
+console.log("URL:", page.url());
+console.log("has Review Agreement:", /Review Agreement|Agree to/i.test(txt));
+console.log("has Renew Membership:", /Renew Membership|expired/i.test(txt));
+console.log("has Contact:", /Contact [A-Z]/i.test(txt));
+console.log("team/entity mentions:", JSON.stringify([...new Set((txt.match(/Enspyr Pty Ltd|Nick Meinhold|Nicholas Meinhold|Individual|Organization/gi)||[]))]));
+console.log("snippet:", txt.slice(0, 500));
+await page.screenshot({ path: "/tmp/dev-account.png", fullPage: false });
+await b.close();

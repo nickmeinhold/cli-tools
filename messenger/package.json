@@ -1,0 +1,18 @@
+{
+  "name": "messenger-cli",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "messenger": "./messenger.mjs"
+  },
+  "dependencies": {
+    "ws3-fca": "^3.5.2"
+  },
+  "devDependencies": {
+    "patch-package": "^8.0.1"
+  },
+  "scripts": {
+    "postinstall": "patch-package"
+  }
+}
