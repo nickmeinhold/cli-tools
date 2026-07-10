@@ -1,0 +1,9 @@
+# parallax ignore list — repos excluded from observation entirely, so they never
+# enter belief or bias the priors. One glob per line (* = any non-slash run,
+# ** = any, trailing / = dir and everything under). # comments allowed.
+#
+# Vendored upstream mirrors: huge behind-counts that are pure noise and would
+# train the Beta prior toward "this repo moves constantly".
+# e.g. a specific vendored fork:  some-org/vendored-upstream
+**/vendor/**
+**/node_modules/**

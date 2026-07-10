@@ -81,6 +81,9 @@ and a `claude` CLI on PATH for the AI-backed tools (`imessage-responder`).
 | [`marketplace-watch`](#marketplace-watch) | Watch FB Marketplace for new listings | Playwright | ⚠️ scraping |
 | [`imessage-responder`](#imessage-responder) | Autonomous AI replies in an iMessage thread | chat.db + headless Claude | macOS only |
 | [`humanitix`](#humanitix) | Humanitix event ticketing — events, orders, tickets | Humanitix public API | ✅ official |
+| [`slack`](#slack) | Read/search/post Slack channels & DMs | Slack Web API | ✅ official |
+| [`radicale`](#radicale) | CalDAV calendars & contacts CRUD | Radicale CalDAV | self-hosted |
+| [`parallax`](#parallax) | Nightly cross-repo "surprise" watchman | git scan + Bayesian belief | local |
 | [`lib`](#lib) | Shared Playwright plumbing | — | — |
 
 ### whatsapp
@@ -231,6 +234,24 @@ python3 imessage-responder/responder.py     # first run arms only; sends nothing
 CLI for the Humanitix public API — list events, orders, tickets, attendees. `x-api-key` auth, `parseArgs` subcommands, JSON out. Get a key from the Humanitix Console → Account → Advanced → Public API key, put it in `~/.claude/.env` as `HUMANITIX_API_KEY`.
 ```bash
 node humanitix/humanitix.mjs --help
+```
+
+### slack
+CLI for the Slack Web API (no deps, plain fetch). Read/search/post channels & DMs. A **user token** (`xoxp-…`) acts as you and can `search`; a **bot token** (`xoxb-…`) only sees channels it's invited to. Put whichever in `~/.claude/.env` as `SLACK_TOKEN`, or use the logged-in Slack desktop app session (zero-setup).
+```bash
+node slack/slack.mjs help
+```
+
+### radicale
+CalDAV CLI for [Radicale](https://radicale.org) — calendars and address books as first-class ops (list/add/delete events & contacts) instead of hand-curled PROPFIND/REPORT. Zero-dependency, Node 18+. Auth via `RADICALE_USERNAME`/`RADICALE_PASSWORD` (+ `RADICALE_BASE_URL` or a `--site` you add to the `SITES` map).
+```bash
+node radicale/radicale.mjs --help
+```
+
+### parallax
+A nightly cross-repo **surprise engine** — scans a fleet of git repos and measures Bayesian belief-shift (`KL(posterior‖prior)` in nats), alarming only when something crosses an attention threshold (silent on a quiet morning). Edit `lib/registry.mjs` (the human seam) with your own heartbeats/expiries; wire `parallax-nightly.sh` to launchd/cron and set `PARALLAX_TG_TO` to Telegram yourself a digest.
+```bash
+node parallax/parallax.mjs scan --json
 ```
 
 ### lib
