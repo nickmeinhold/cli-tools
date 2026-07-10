@@ -80,6 +80,7 @@ and a `claude` CLI on PATH for the AI-backed tools (`imessage-responder`).
 | [`social`](#social) | Build a social graph from FB/LinkedIn | Playwright + GitHub API | ⚠️ scraping |
 | [`marketplace-watch`](#marketplace-watch) | Watch FB Marketplace for new listings | Playwright | ⚠️ scraping |
 | [`imessage-responder`](#imessage-responder) | Autonomous AI replies in an iMessage thread | chat.db + headless Claude | macOS only |
+| [`humanitix`](#humanitix) | Humanitix event ticketing — events, orders, tickets | Humanitix public API | ✅ official |
 | [`lib`](#lib) | Shared Playwright plumbing | — | — |
 
 ### whatsapp
@@ -224,6 +225,12 @@ Only use this with someone who **knows and consents** to autonomous AI replies.
 export CONTACT_HANDLE="+10000000000"  OWNER_HANDLE="you@example.com"
 cp imessage-responder/system-prompt.txt.example imessage-responder/system-prompt.txt
 python3 imessage-responder/responder.py     # first run arms only; sends nothing
+```
+
+### humanitix
+CLI for the Humanitix public API — list events, orders, tickets, attendees. `x-api-key` auth, `parseArgs` subcommands, JSON out. Get a key from the Humanitix Console → Account → Advanced → Public API key, put it in `~/.claude/.env` as `HUMANITIX_API_KEY`.
+```bash
+node humanitix/humanitix.mjs --help
 ```
 
 ### lib
