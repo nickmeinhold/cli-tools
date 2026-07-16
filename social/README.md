@@ -20,7 +20,7 @@ social auth <network>          # one-time interactive login
 | linkedin | `connections` | 1st-degree connections | Voyager internal API |
 | facebook | `friends`, `enrich` | friends; enrich adds Lives-in/Works-at + Melbourne/tech tags | React DOM + per-profile crawl |
 | meetup | `members --group X` | members of a group you're in | GraphQL `/gql` |
-| luma | `guests --event Y` | guest list of an event you host | lu.ma host API |
+| luma | `guests --event Y` | guest list of an event you host | api.luma.com (internal JSON API) |
 
 The "slippery" pattern: drive a logged-in Playwright session to the site's own
 origin, then call its **internal JSON API** with an in-page `fetch()` (same-origin,

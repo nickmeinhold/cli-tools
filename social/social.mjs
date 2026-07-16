@@ -523,228 +523,292 @@ async function harvestMeetupDelete(page, opts) {
   return { records: [{ id, deleted: true }], note: `Meetup event deleted: ${id}` };
 }
 
-// ── Luma: event guests ───────────────────────────────────────────────────────
-// Luma migrated lu.ma → luma.com and the old /api/event/get-guests endpoint 404s.
-// The reliable path is the event's guest-management page (host session required):
-// https://luma.com/event/manage/<evt-…>/guests — scrape the rendered guest table.
-// Rows render as sequential text: Name / email / RSVP (Going|Not Going|…) / date.
-// Verified live 2026-07-01.
-async function harvestLumaGuests(page, opts) {
-  if (!opts.event) return { error: "pass --event <evt-…-api-id> (the event you HOST)" };
-  await page.goto(`https://luma.com/event/manage/${opts.event}/guests`, { waitUntil: "domcontentloaded" });
-  return page.evaluate(async ({ limit }) => {
-    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-    await wait(5000);
-    for (let i = 0; i < 8; i++) { window.scrollTo(0, document.body.scrollHeight); await wait(600); }
-    const root = document.querySelector("main") || document.body;
-    const lines = root.innerText.replace(/\r/g, "").split("\n").map((s) => s.trim()).filter(Boolean);
-    const gi = lines.lastIndexOf("Guest List");
-    const area = gi >= 0 ? lines.slice(gi) : lines;
-    const isEmail = (s) => /^[\w.+-]+@[\w-]+\.[\w.-]+$/.test(s);
-    const isRsvp = (s) => /^(Going|Not Going|Waitlist(ed)?|Pending|Invited|Declined|Checked In)$/i.test(s);
-    const isDate = (s) => /^\d{1,2}\s\w{3}$|\d{4}/.test(s);
-    const out = [];
-    for (let i = 0; i < area.length && out.length < limit; i++) {
-      if (!isEmail(area[i])) continue;
-      const email = area[i];
-      const name = area[i - 1] && !isEmail(area[i - 1]) ? area[i - 1] : "";
-      let status = "", registered_at = "";
-      for (let k = i + 1; k < Math.min(i + 5, area.length); k++) {
-        if (isRsvp(area[k])) status = area[k];
-        else if (isDate(area[k])) registered_at = area[k];
-      }
-      out.push({ name, email, status, registered_at });
-    }
-    return { records: out };
-  }, { limit: opts.limit });
+// ── Luma: internal API (api.luma.com) ────────────────────────────────────────
+// Luma's web app is a thin renderer over api.luma.com, and the logged-in session
+// can call the same endpoints directly — fetch from the luma.com origin so the
+// browser attaches cookies and CORS behaves exactly as for the real app (the
+// same "slippery" approach as the LinkedIn Voyager harvest above). Ported off
+// DOM form-filling 2026-07-16 after the selector-rot class bit twice in two
+// weeks (lu.ma → luma.com, inputs → textareas). Shapes captured live 2026-07-16
+// by sniffing the create/edit/cancel flows:
+//   POST /event/create                        → {api_id, url}
+//   GET  /event/admin/get?event_api_id=       → {event, description_mirror, …}
+//   POST /event/admin/update                  (read-modify-write, full field set)
+//   POST /event/admin/cancel-event            → {task_id} → GET /task/get-status
+//   GET  /event/admin/get-guests?…            → {entries, has_more}
+//   GET  /home/get-events?period=future       → {entries:[{event:{…}}], has_more}
+//   GET  /calendar/admin/list                 → {infos:[{calendar:{api_id}}]}
+//   GET  /event/admin/get-suggested-locations → {locations:[<geo_address_json>]}
+async function lumaApi(page, path, body) {
+  if (!page.url().startsWith("https://luma.com")) {
+    await page.goto("https://luma.com/home", { waitUntil: "domcontentloaded" });
+    await page.waitForTimeout(1500);
+  }
+  const res = await page.evaluate(async ({ path, body }) => {
+    const r = await fetch(`https://api.luma.com${path}`, body === undefined
+      ? { credentials: "include" }
+      : { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const text = await r.text();
+    let json = null; try { json = JSON.parse(text); } catch {}
+    return { ok: r.ok, status: r.status, json, text: text.slice(0, 300) };
+  }, { path, body });
+  if (!res.ok) throw new Error(`api.luma.com${path.split("?")[0]} → HTTP ${res.status}: ${res.text}`);
+  return res.json;
 }
 
-// ── Luma: list upcoming events (host dashboard) ──────────────────────────────
-// Scrape the feed at luma.com/home. Ported from events-mcp's luma_list_events,
-// but its core assumption was stale: it looked for /event/manage/<id> anchors,
-// which today's Luma renders ONLY inside an event you host — the /home feed
-// links each event by a short PUBLIC slug (/x7lh4631). So we select the
-// slug-anchors (each wraps a whole event card) and read the card's innerText.
-// The feed mixes events you HOST / are Going to / are Invited to, so we capture
-// `status` to make host-vs-guest filterable downstream. Robust innerText idiom
-// (React SPA class names churn; anchor hrefs + card text are stable).
-// Verified live 2026-07-04.
+const evtIdFrom = (opts) => {
+  let id = typeof opts.event === "string" ? opts.event : (typeof opts.id === "string" ? opts.id : "");
+  if (!id && typeof opts.url === "string") { const m = opts.url.match(/(evt-[A-Za-z0-9]+)/); if (m) id = m[1]; }
+  return /^evt-[A-Za-z0-9]+$/.test(id) ? id : "";
+};
+
+// "2026-07-26" | "26 July 2026" | "Sat 5 Jul" (weekday ignored; a yearless date
+// means the NEXT occurrence) → {y, mo, d}, or null if unparseable.
+function parseLumaDay(s) {
+  let m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return { y: +m[1], mo: +m[2], d: +m[3] };
+  m = String(s).toLowerCase().match(/(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]{3,})\.?,?\s*(\d{4})?/);
+  if (!m) return null;
+  const mo = MONTHS.findIndex((x) => x.toLowerCase().startsWith(m[2])) + 1;
+  if (!mo) return null;
+  let y = m[3] ? +m[3] : new Date().getFullYear();
+  if (!m[3] && new Date(y, mo - 1, +m[1], 23, 59) < new Date()) y += 1;
+  return { y, mo, d: +m[1] };
+}
+
+// Wall-clock {y,mo,d} + "HH:MM" in an IANA zone → UTC Date. The zone offset is
+// found by fixed-point iteration (two passes settle DST edges).
+function zonedToUtc(day, hhmm, tz) {
+  const [hh, mm] = hhmm.split(":").map(Number);
+  const want = Date.UTC(day.y, day.mo - 1, day.d, hh, mm);
+  let t = want;
+  for (let i = 0; i < 2; i++) {
+    const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+      timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hour12: false,
+    }).formatToParts(new Date(t)).map((x) => [x.type, x.value]));
+    t += want - Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute);
+  }
+  return new Date(t);
+}
+
+// A UTC instant → its wall-clock {y, mo, d, hhmm} in an IANA zone.
+function utcToZoned(date, tz) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+    timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(date).map((x) => [x.type, x.value]));
+  return { y: +p.year, mo: +p.month, d: +p.day, hhmm: `${String(+p.hour % 24).padStart(2, "0")}:${p.minute}` };
+}
+
+// Plain text → Luma's ProseMirror description doc (one paragraph per line,
+// blank lines become empty paragraphs — matches what the UI editor produces).
+function lumaTextToDoc(text) {
+  return { type: "doc", content: String(text).replace(/\r/g, "").split("\n").map((l) =>
+    l.trim() ? { type: "paragraph", content: [{ type: "text", text: l }] } : { type: "paragraph" }) };
+}
+
+const isoDuration = (startAt, endAt) => {
+  const min = Math.round((endAt - startAt) / 60000);
+  return `PT${Math.floor(min / 60)}H${min % 60 ? `${min % 60}M` : ""}`;
+};
+
+// Resolve --location against the account's suggested locations (Google-place
+// JSON, the shape /event/create expects). No fuzzy geocoding here — an
+// unmatched location is an ERROR, not a silently-unset field.
+async function lumaResolveLocation(page, opts) {
+  if (typeof opts["location-json"] === "string" && opts["location-json"]) {
+    try { return { geo: JSON.parse(opts["location-json"]) }; } catch { return { error: "--location-json is not valid JSON" }; }
+  }
+  const q = typeof opts.location === "string" ? opts.location.trim() : "";
+  if (!q) return { geo: null };
+  const sug = await lumaApi(page, "/event/admin/get-suggested-locations");
+  const ql = q.toLowerCase();
+  const geo = (sug.locations || []).find((l) =>
+    [l.address, l.full_address].some((a) => String(a || "").toLowerCase().includes(ql)));
+  if (!geo) return { error: `--location "${q}" matched none of your Luma suggested locations (${(sug.locations || []).map((l) => l.address).join(" | ") || "none yet"}). Pick it once in the UI (it becomes a suggestion), or pass --location-json '<geo_address_json>'.` };
+  return { geo };
+}
+
+// ── Luma: event guests ───────────────────────────────────────────────────────
+// GET /event/admin/get-guests (host session required). Field names inside each
+// entry are mapped defensively — probed on a 0-guest event, so the entry shape
+// is from Luma's web app usage, not a spec.
+async function harvestLumaGuests(page, opts) {
+  const id = evtIdFrom(opts) || (typeof opts.event === "string" ? opts.event : "");
+  if (!id) return { error: "pass --event <evt-…-api-id> (the event you HOST)" };
+  const j = await lumaApi(page, `/event/admin/get-guests?event_api_id=${encodeURIComponent(id)}&pagination_limit=${Math.min(opts.limit, 100)}&query=&sort_column=registered_or_created_at&sort_direction=desc`);
+  const out = (j.entries || []).map((e) => {
+    const g = e.guest || e.user || e;
+    return {
+      name: g.name || g.user_name || [g.first_name, g.last_name].filter(Boolean).join(" ") || "",
+      email: g.email || g.user_email || "",
+      status: g.approval_status || g.status || "",
+      registered_at: g.registered_at || g.created_at || "",
+    };
+  });
+  const res = { records: out.slice(0, opts.limit) };
+  if (j.has_more) res.note = `guest list truncated at ${out.length} (has_more=true) — raise --limit (max 100/page; pagination cursor not yet implemented)`;
+  return res;
+}
+
+// ── Luma: list upcoming events ───────────────────────────────────────────────
+// GET /home/get-events — the JSON behind the /home feed. Mixes events you HOST
+// and events you're going to / invited to; `role` is mapped defensively when the
+// entry carries one.
 async function harvestLumaEvents(page, opts) {
-  await page.goto("https://luma.com/home", { waitUntil: "domcontentloaded" });
-  return page.evaluate(async ({ limit }) => {
-    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-    await wait(6000); // let the SPA render the event cards
-    // Nav/utility routes that are NOT events, so we can keep the slug allowlist tight.
-    const RESERVED = new Set(["home", "discover", "create", "pricing", "app", "signin", "explore"]);
-    const isRsvp = (s) => /^(Going|Not Going|Waitlist(ed)?|Pending|Invited|Declined|Checked In|Going \+|Manage)$/i.test(s);
-    const seen = new Set();
-    const out = [];
-    for (const a of document.querySelectorAll('a[href^="/"]')) {
-      if (out.length >= limit) break;
-      const href = a.getAttribute("href") || "";
-      const m = href.match(/^\/([A-Za-z0-9][A-Za-z0-9-]{4,})$/); // short public slug
-      if (!m) continue;
-      const slug = m[1];
-      if (RESERVED.has(slug.toLowerCase()) || slug.startsWith("home")) continue;
-      if (seen.has(slug)) continue;
-      // The slug anchor is a bare overlay (innerText ≈ 1 char); the card text
-      // lives in an ancestor. Walk up to the first ancestor with ≥3 text lines.
-      let card = a;
-      for (let i = 0; i < 10 && card.parentElement; i++) {
-        card = card.parentElement;
-        if ((card.innerText || "").replace(/​/g, "").split("\n").filter((l) => l.trim()).length >= 3) break;
-      }
-      const lines = (card.innerText || "").split("\n").map((l) => l.replace(/​/g, "").trim()).filter(Boolean);
-      if (lines.length < 3) continue; // not an event card
-      seen.add(slug);
-      // Card structure (positional but tolerant): time, title, "By <hosts>", venue, status, +count.
-      const timeLine = lines.find((l) => /^\d{1,2}:\d{2}$/.test(l)) || "";
-      const hostIdx = lines.findIndex((l) => /^By\s/i.test(l));
-      const statusLine = lines.find(isRsvp) || "";
-      // Title: first substantial line that isn't time/host/status/count.
-      const title = lines.find((l) =>
-        l !== timeLine && l !== statusLine && !/^By\s/i.test(l) &&
-        !/^\+\d+$/.test(l) && !/^\d{1,2}:\d{2}$/.test(l) && l.length > 3) || lines[0];
-      // Venue: the line after the host line that isn't the status/count.
-      const venue = hostIdx >= 0
-        ? (lines.slice(hostIdx + 1).find((l) => !isRsvp(l) && !/^\+\d+$/.test(l)) || "")
-        : "";
-      out.push({
-        slug,
-        url: `https://luma.com/${slug}`,
-        title,
-        time: timeLine,
-        host: hostIdx >= 0 ? lines[hostIdx].replace(/^By\s+/i, "") : "",
-        venue,
-        status: statusLine,
-      });
-    }
-    return { records: out };
-  }, { limit: opts.limit });
+  const j = await lumaApi(page, `/home/get-events?pagination_limit=${Math.min(Math.max(opts.limit, 1), 50)}&period=future`);
+  const out = (j.entries || []).map((entry) => {
+    const e = entry.event || {};
+    return {
+      id: e.api_id || entry.api_id || "",
+      slug: e.url || "",
+      url: e.url ? `https://luma.com/${e.url}` : "",
+      title: e.name || "",
+      start_at: e.start_at || "",
+      end_at: e.end_at || "",
+      timezone: e.timezone || "",
+      venue: e.geo_address_info?.address || "",
+      visibility: e.visibility || "",
+      role: entry.role || entry.rsvp_status || "",
+    };
+  });
+  return { records: out.slice(0, opts.limit) };
 }
 
 // ── Luma: create an event ────────────────────────────────────────────────────
-// Fills the real luma.com/create form (probed live 2026-07-04): the title is a
-// <textarea placeholder="Event Name">, start/end DATES are text inputs in
-// "Ddd D Mmm" format, start/end TIMES are <input type=time placeholder="HH:MM">,
-// with "Add Event Location" / "Add Description" reveal buttons and a final
-// "Create Event" submit. Returns the created event's URL. Luma has no draft
-// state — the event is live on submit — so callers testing this should pass an
-// obviously-disposable --title and delete immediately (see luma delete).
-//   social luma create --title "X" [--start "Sat 5 Jul" --start-time 18:00
-//     --end "Sat 5 Jul" --end-time 20:00 --location "…" --description "…"]
+// POST /event/create with the payload the web form sends (captured live
+// 2026-07-16; a minimal payload 400s, so the full field set is required). The
+// command FAILS CLOSED: bad/unparseable inputs error before any API call, an
+// unmatched --location is an error (not a silently-unset field), and the created
+// event is read back and diffed against what was asked before success is
+// reported. Luma has no draft state — the event is public on create — so tests
+// should use a disposable --title and `luma delete` immediately.
+//   social luma create --title "X" [--start "2026-07-26" --start-time 18:00
+//     --end-time 20:00 --location "…" --description "…" --timezone Area/City]
 async function harvestLumaCreate(page, opts) {
   const title = typeof opts.title === "string" ? opts.title : "";
-  if (!title) return { error: 'pass --title "Event Name" (optional: --start "Sat 5 Jul" --start-time 18:00 --end-time 20:00 --location "…" --description "…")' };
-  await page.goto("https://luma.com/create", { waitUntil: "domcontentloaded" });
-  await page.waitForTimeout(4000);
+  if (!title) return { error: 'pass --title "Event Name" (optional: --start "2026-07-26" --start-time 18:00 --end-time 20:00 --location "…" --description "…" --timezone Australia/Melbourne)' };
+  const tz = typeof opts.timezone === "string" && opts.timezone ? opts.timezone : "Australia/Melbourne";
 
-  const titleBox = page.locator('textarea[placeholder="Event Name"]').first();
-  await titleBox.waitFor({ timeout: 10000 });
-  await titleBox.fill(title);
+  const day = opts.start ? parseLumaDay(String(opts.start)) : utcToZoned(new Date(), tz);
+  if (!day) return { error: `could not parse --start "${opts.start}" (use "2026-07-26", "26 July 2026", or "Sat 26 Jul")` };
+  const st = String(opts["start-time"] || opts.startTime || "18:00");
+  const et = String(opts["end-time"] || opts.endTime || "");
+  if (!/^\d{1,2}:\d{2}$/.test(st) || (et && !/^\d{1,2}:\d{2}$/.test(et))) return { error: "--start-time/--end-time must be HH:MM (24h)" };
+  const endDay = opts.end ? parseLumaDay(String(opts.end)) : day;
+  if (!endDay) return { error: `could not parse --end "${opts.end}"` };
+  const startAt = zonedToUtc(day, st, tz);
+  const endAt = et ? zonedToUtc(endDay, et, tz) : new Date(startAt.getTime() + 3600e3);
+  if (endAt <= startAt) return { error: `end (${endAt.toISOString()}) is not after start (${startAt.toISOString()})` };
 
-  const dateInputs = page.locator('input[type="text"]'); // start-date, end-date (Ddd D Mmm)
-  const timeInputs = page.locator('input[type="time"]'); // start-time, end-time
-  // Setting a date/time opens a floating-ui picker overlay that will intercept
-  // the later "Create Event" click if left open — dismiss it with Escape.
-  const setDate = async (n, val) => {
-    const el = dateInputs.nth(n);
-    if (await el.isVisible().catch(() => false)) { await el.click(); await el.fill(String(val)); await page.keyboard.press("Enter").catch(() => {}); await page.keyboard.press("Escape").catch(() => {}); await page.waitForTimeout(400); }
+  const loc = await lumaResolveLocation(page, opts);
+  if (loc.error) return { error: loc.error };
+
+  const cals = await lumaApi(page, "/calendar/admin/list");
+  const calId = cals.infos?.[0]?.calendar?.api_id;
+  if (!calId) return { error: "could not resolve your calendar (GET /calendar/admin/list returned none) — stale session? re-run `social auth luma`" };
+
+  const payload = {
+    name: title,
+    start_at: startAt.toISOString(),
+    duration_interval: isoDuration(startAt, endAt),
+    zoom_meeting_url: "", zoom_meeting_id: "", zoom_meeting_password: "",
+    description_mirror: typeof opts.description === "string" && opts.description ? lumaTextToDoc(opts.description) : null,
+    geo_address_visibility: "public",
+    cover_url: "https://images.lumacdn.com/gallery-images/de/a12a3146-d8ca-4e7d-865b-772a559a0a14",
+    zoom_session_type: null, zoom_creation_method: null,
+    location_type: "offline", // online/zoom events not supported here (weren't in the DOM flow either)
+    geo_address_json: loc.geo || null,
+    coordinate: null,
+    timezone: tz,
+    calendar_api_id: calId, calendar_to_submit_to_api_id: null,
+    grant_manage_access: false, _calendar_requires_manage_access: false,
+    supports_members_only: false, max_capacity: null, waitlist_status: "disabled",
+    visibility: "public",
+    theme_meta: { theme: "legacy" }, tint_color: "#fcedd4", font_title: "roc-grotesk",
+    ticket_types: [{ currency: null, type: "free", ethereum_token_requirements: [], cents: null, is_flexible: false, min_cents: null, require_approval: false, is_hidden: false }],
   };
-  const setTime = async (n, val) => {
-    const el = timeInputs.nth(n);
-    if (await el.isVisible().catch(() => false)) { await el.fill(String(val)); await page.keyboard.press("Escape").catch(() => {}); await page.waitForTimeout(200); }
+  const created = await lumaApi(page, "/event/create", payload);
+  if (!created?.api_id) return { error: `POST /event/create returned no api_id: ${JSON.stringify(created).slice(0, 200)}` };
+
+  // Read back and diff — success is only reported for a verified event.
+  const got = await lumaApi(page, `/event/admin/get?event_api_id=${created.api_id}`);
+  const ev = got.event || {};
+  const rec = {
+    id: created.api_id,
+    url: `https://luma.com/${created.url}`,
+    manage: `https://luma.com/event/manage/${created.api_id}`,
+    title: ev.name, start_at: ev.start_at, end_at: ev.end_at, timezone: ev.timezone,
+    location: ev.geo_address_json?.address || ev.geo_address_info?.address || "",
+    visibility: ev.visibility,
   };
-  if (opts.start) await setDate(0, opts.start);
-  if (opts["start-time"] || opts.startTime) await setTime(0, opts["start-time"] || opts.startTime);
-  if (opts.end) await setDate(1, opts.end);
-  if (opts["end-time"] || opts.endTime) await setTime(1, opts["end-time"] || opts.endTime);
-
-  if (typeof opts.location === "string" && opts.location) {
-    const locBtn = page.locator('text=Add Event Location').first();
-    if (await locBtn.isVisible().catch(() => false)) {
-      await locBtn.click(); await page.waitForTimeout(800);
-      const locInput = page.locator('input[placeholder*="location" i], input[placeholder*="address" i], input[placeholder*="link" i]').first();
-      if (await locInput.isVisible().catch(() => false)) {
-        await locInput.fill(opts.location); await page.waitForTimeout(1200);
-        const opt = page.locator('[role="option"]').first();
-        if (await opt.isVisible().catch(() => false)) await opt.click();
-      }
-    }
-  }
-  if (typeof opts.description === "string" && opts.description) {
-    const descBtn = page.locator('text=Add Description').first();
-    if (await descBtn.isVisible().catch(() => false)) {
-      await descBtn.click(); await page.waitForTimeout(800);
-      const descBox = page.locator('[contenteditable="true"], textarea').last();
-      if (await descBox.isVisible().catch(() => false)) await descBox.fill(opts.description);
-    }
-  }
-
-  await page.keyboard.press("Escape").catch(() => {}); // clear any lingering picker overlay
-  await page.waitForTimeout(300);
-  const createBtn = page.getByRole("button", { name: "Create Event" }).first();
-  await createBtn.waitFor({ timeout: 5000 });
-  await createBtn.click();
-  await page.waitForTimeout(6000); // Luma redirects to the new event's manage/overview
-  const url = page.url();
-  const m = url.match(/\/(?:event\/manage\/)?(evt-[A-Za-z0-9]+|[A-Za-z0-9-]{5,})/);
-  const id = m ? m[1] : "";
-  return { records: [{ title, id, url }], note: `Event created: ${url}` };
+  const mismatch = [];
+  if (ev.name !== title) mismatch.push(`name "${ev.name}" ≠ "${title}"`);
+  if (ev.start_at !== startAt.toISOString()) mismatch.push(`start_at ${ev.start_at} ≠ ${startAt.toISOString()}`);
+  if (ev.end_at !== endAt.toISOString()) mismatch.push(`end_at ${ev.end_at} ≠ ${endAt.toISOString()}`);
+  if (loc.geo && rec.location !== loc.geo.address) mismatch.push(`location "${rec.location}" ≠ "${loc.geo.address}"`);
+  if (mismatch.length) return { error: `event ${created.api_id} WAS created but readback mismatched: ${mismatch.join("; ")} — inspect ${rec.manage} (or \`luma delete --event ${created.api_id}\`)`, records: [rec] };
+  return { records: [rec], note: `Event created (verified): ${rec.url} (manage: ${rec.manage})` };
 }
 
 // ── Luma: edit an event ──────────────────────────────────────────────────────
-// On the manage page, "Edit Event" reveals the same inline form as create; an
-// "Update Event" button appears only once a field changes (no autosave — the
-// edit is lost without the click). Only provided fields are touched. Probed live
-// 2026-07-04. Same date/time formats as create (dates "Ddd D Mmm", times HH:MM).
-//   social luma edit --event evt-… [--title "…" --description "…" --start "Sat 5 Jul"
+// Read-modify-write: GET /event/admin/get, overlay the provided fields, POST
+// /event/admin/update with the full field set the web form sends (captured live
+// 2026-07-16). Only provided flags change; everything else round-trips from the
+// read. Fails closed: the update response is diffed against the request.
+//   social luma edit --event evt-… [--title "…" --description "…" --start "2026-07-26"
 //     --start-time 18:00 --end-time 20:00 --location "…"]
 async function harvestLumaEdit(page, opts) {
-  let id = typeof opts.event === "string" ? opts.event : (typeof opts.id === "string" ? opts.id : "");
-  if (!id && typeof opts.url === "string") { const m = opts.url.match(/(evt-[A-Za-z0-9]+)/); if (m) id = m[1]; }
-  if (!/^evt-[A-Za-z0-9]+$/.test(id)) return { error: "pass --event evt-… (or --url <manage url>) and at least one field to change" };
-  await page.goto(`https://luma.com/event/manage/${id}`, { waitUntil: "domcontentloaded" });
-  await page.waitForTimeout(3500);
-  const editBtn = page.getByRole("button", { name: "Edit Event" }).first();
-  if (!(await editBtn.isVisible().catch(() => false))) return { error: `no "Edit Event" on manage/${id} — not found, or not an event you host?` };
-  await editBtn.click();
-  await page.waitForTimeout(2500);
+  const id = evtIdFrom(opts);
+  if (!id) return { error: "pass --event evt-… (or --url <manage url>) and at least one field to change" };
+  const changed = ["title", "description", "start", "start-time", "end-time", "location", "location-json"]
+    .filter((k) => typeof opts[k] === "string" && opts[k]);
+  if (!changed.length) return { error: "no fields changed — pass --title/--description/--start/--start-time/--end-time/--location" };
 
-  const updated = [];
-  if (typeof opts.title === "string" && opts.title) {
-    const t = page.locator("textarea").first();
-    if (await t.isVisible().catch(() => false)) { await t.fill(opts.title); updated.push("title"); }
-  }
-  if (typeof opts.description === "string" && opts.description) {
-    const d = page.locator('[contenteditable="true"]').first();
-    if (await d.isVisible().catch(() => false)) { await d.fill(opts.description); updated.push("description"); }
-  }
-  const dateInputs = page.locator('input[type="text"]');
-  const timeInputs = page.locator('input[type="time"]');
-  if (typeof opts.start === "string" && opts.start) {
-    const el = dateInputs.nth(0);
-    if (await el.isVisible().catch(() => false)) { await el.click(); await el.fill(opts.start); await page.keyboard.press("Enter").catch(() => {}); await page.keyboard.press("Escape").catch(() => {}); updated.push("start"); }
-  }
+  const got = await lumaApi(page, `/event/admin/get?event_api_id=${encodeURIComponent(id)}`);
+  const ev = got.event;
+  if (!ev?.api_id) return { error: `event ${id} not found (or not an event you host)` };
+  const tz = ev.timezone || "Australia/Melbourne";
+
+  let startAt = new Date(ev.start_at), endAt = new Date(ev.end_at);
+  const day = opts.start ? parseLumaDay(String(opts.start)) : null;
+  if (opts.start && !day) return { error: `could not parse --start "${opts.start}"` };
   const st = opts["start-time"] || opts.startTime, et = opts["end-time"] || opts.endTime;
-  if (st) { const el = timeInputs.nth(0); if (await el.isVisible().catch(() => false)) { await el.fill(String(st)); await page.keyboard.press("Escape").catch(() => {}); updated.push("start-time"); } }
-  if (et) { const el = timeInputs.nth(1); if (await el.isVisible().catch(() => false)) { await el.fill(String(et)); await page.keyboard.press("Escape").catch(() => {}); updated.push("end-time"); } }
-  if (typeof opts.location === "string" && opts.location) {
-    const loc = page.locator('input[placeholder="What\'s the address?"]').first();
-    if (await loc.isVisible().catch(() => false)) {
-      await loc.fill(opts.location); await page.waitForTimeout(1200);
-      const o = page.locator('[role="option"]').first();
-      if (await o.isVisible().catch(() => false)) await o.click();
-      updated.push("location");
-    }
-  }
-  if (!updated.length) return { error: "no fields changed — pass --title/--description/--start/--start-time/--end-time/--location" };
+  if ((st && !/^\d{1,2}:\d{2}$/.test(String(st))) || (et && !/^\d{1,2}:\d{2}$/.test(String(et)))) return { error: "--start-time/--end-time must be HH:MM (24h)" };
+  if (day || st) startAt = zonedToUtc(day || utcToZoned(startAt, tz), String(st || utcToZoned(startAt, tz).hhmm), tz);
+  if (day || et) endAt = zonedToUtc(day || utcToZoned(endAt, tz), String(et || utcToZoned(endAt, tz).hhmm), tz);
+  if (endAt <= startAt) return { error: `end (${endAt.toISOString()}) is not after start (${startAt.toISOString()})` };
 
-  const update = page.getByRole("button", { name: "Update Event" }).first();
-  await update.waitFor({ timeout: 5000 });
-  await update.click();
-  await page.waitForTimeout(3000);
-  return { records: [{ id, updated }], note: `Luma event updated (${updated.join(", ")}): ${id}` };
+  const loc = await lumaResolveLocation(page, opts);
+  if (loc.error) return { error: loc.error };
+
+  const payload = {
+    event_api_id: id,
+    coordinate: ev.coordinate ?? null,
+    description_mirror: typeof opts.description === "string" && opts.description
+      ? lumaTextToDoc(opts.description)
+      : (got.description_mirror ?? ev.description_mirror ?? null),
+    duration_interval: isoDuration(startAt, endAt),
+    font_title: ev.font_title ?? "roc-grotesk",
+    geo_address_json: loc.geo ?? ev.geo_address_json ?? null,
+    geo_address_visibility: ev.geo_address_visibility ?? "public",
+    location_type: ev.location_type ?? "offline",
+    name: typeof opts.title === "string" && opts.title ? opts.title : ev.name,
+    start_at: startAt.toISOString(),
+    theme_meta: ev.theme_meta ?? { theme: "legacy" },
+    timezone: tz,
+    tint_color: ev.tint_color ?? "#fcedd4",
+    zoom_meeting_id: null, zoom_meeting_password: null, zoom_meeting_url: null,
+  };
+  const res = await lumaApi(page, "/event/admin/update", payload);
+  const after = res.event || {};
+  const mismatch = [];
+  if (after.name !== payload.name) mismatch.push(`name "${after.name}" ≠ "${payload.name}"`);
+  if (after.start_at !== payload.start_at) mismatch.push(`start_at ${after.start_at} ≠ ${payload.start_at}`);
+  if (after.end_at !== endAt.toISOString()) mismatch.push(`end_at ${after.end_at} ≠ ${endAt.toISOString()}`);
+  if (mismatch.length) return { error: `update of ${id} did not stick: ${mismatch.join("; ")} — inspect https://luma.com/event/manage/${id}` };
+  return { records: [{ id, updated: changed, start_at: after.start_at, end_at: after.end_at }], note: `Luma event updated (${changed.join(", ")}, verified): ${id}` };
 }
 
 // ── Luma: change an event's cover photo ──────────────────────────────────────
@@ -794,27 +858,24 @@ async function harvestLumaChangePhoto(page, opts) {
 }
 
 // ── Luma: delete (cancel) an event ───────────────────────────────────────────
-// Luma has no "delete" — it's "Cancel Event", on the manage/<id>/more page,
-// behind a two-step confirm (page button opens a modal whose own "Cancel Event"
-// button commits; the modal also offers a guest-notification email — moot with
-// no guests). Permanent, per Luma's own warning. Probed live 2026-07-04.
+// Luma has no "delete" — POST /event/admin/cancel-event (permanent, per Luma's
+// own UI warning; guests are notified unless custom_email is set). The call
+// returns a task id; poll /task/get-status until it settles and only report
+// success on the task's own "success".
 //   social luma delete --event evt-…   (or --url <manage/public url>)
 async function harvestLumaDelete(page, opts) {
-  let id = typeof opts.event === "string" ? opts.event : (typeof opts.id === "string" ? opts.id : "");
-  if (!id && typeof opts.url === "string") { const m = opts.url.match(/(evt-[A-Za-z0-9]+)/); if (m) id = m[1]; }
-  if (!/^evt-[A-Za-z0-9]+$/.test(id)) return { error: 'pass --event evt-… (or --url <manage url>) of the event to delete' };
-  await page.goto(`https://luma.com/event/manage/${id}/more`, { waitUntil: "domcontentloaded" });
-  await page.waitForTimeout(3000);
-  const pageCancel = page.getByRole("button", { name: "Cancel Event" }).first();
-  if (!(await pageCancel.isVisible().catch(() => false))) return { error: `no "Cancel Event" on manage/${id}/more — already deleted, or not an event you host?` };
-  await pageCancel.click();
-  await page.waitForTimeout(1500);
-  // Confirm inside the modal (scope to the overlay so we don't re-click the page button).
-  const modalCancel = page.locator('.lux-overlay.modal, [role="dialog"]').getByRole("button", { name: "Cancel Event" }).last();
-  await modalCancel.waitFor({ timeout: 5000 });
-  await modalCancel.click();
-  await page.waitForTimeout(3000);
-  return { records: [{ id, deleted: true }], note: `Event cancelled/deleted: ${id}` };
+  const id = evtIdFrom(opts);
+  if (!id) return { error: "pass --event evt-… (or --url <manage url>) of the event to delete" };
+  const r = await lumaApi(page, "/event/admin/cancel-event", { event_api_id: id, custom_email: null, should_refund: false });
+  if (!r?.task_id) return { error: `cancel-event returned no task_id: ${JSON.stringify(r).slice(0, 200)}` };
+  let status = null;
+  for (let i = 0; i < 10; i++) {
+    await page.waitForTimeout(1000);
+    status = await lumaApi(page, `/task/get-status?task_id=${encodeURIComponent(r.task_id)}`).catch(() => null);
+    if (status?.status && status.status !== "pending") break;
+  }
+  if (status?.status !== "success") return { error: `cancel task for ${id} did not report success (status: ${status?.status ?? "unknown"}) — check https://luma.com/event/manage/${id}` };
+  return { records: [{ id, deleted: true }], note: `Event cancelled (task verified): ${id}` };
 }
 
 // ── Sync: mirror an event from one platform to the other ─────────────────────
@@ -946,7 +1007,7 @@ harvest (roster/attendees):
   social auth <network>   social networks
 events (create/manage across luma + meetup — folded in from events-mcp):
   luma list                                  list your upcoming Luma events
-  luma create --title X --start "Sat 5 Jul" --start-time 18:00 [--end-time --location --description]
+  luma create --title X --start 2026-07-26 --start-time 18:00 [--end-time --location --description --timezone --location-json]
   luma edit --event evt-… [--title --description --start --start-time --end-time --location]
   luma change-photo --event evt-… (--search tech | --category Tech | --file /abs.jpg)
   luma delete --event evt-…
