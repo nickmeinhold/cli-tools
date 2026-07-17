@@ -1143,6 +1143,7 @@ events (create/manage across luma + meetup — folded in from events-mcp):
   meetup delete --group X --event <id>
   meetup messages [--limit N]                your DM inbox (read-only)
   meetup messages --convo <id>               read one conversation thread
+  meetup dm (--member <id> | --name "X") --text "…" --confirm   send ONE 1:1 DM (draft-gated)
   sync --from <event-url> --to luma|meetup [--group X] [--publish]   mirror an event across platforms
 discover (find people NOT yet in the social graph):
   social discover github      2nd-degree builder-graph crawl (who your people follow)
