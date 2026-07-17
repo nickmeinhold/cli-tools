@@ -27,9 +27,13 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } fr
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // --- Config: which group + knowledge base this instance serves ---------------
-const CONFIGS_DIR = join(homedir(), ".claude", "cli-tools", "whatsapp", "wa-msngr-configs");
+// Configs live next to this script so the tool survives repo moves (the old
+// hardcoded ~/.claude/cli-tools path crash-looped launchd for days after the
+// code migrated to ~/git/tools).
+const CONFIGS_DIR = join(dirname(fileURLToPath(import.meta.url)), "wa-msngr-configs");
 const CONFIG_NAME = process.env.WA_MSNGR_CONFIG || "echo";
 const CONFIG_FILE = process.env.WA_MSNGR_CONFIG_FILE || join(CONFIGS_DIR, `${CONFIG_NAME}.json`);
 let CFG;
