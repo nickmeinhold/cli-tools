@@ -407,8 +407,12 @@ async function openSocket({ qrCallback } = {}) {
       const name = Object.entries(DisconnectReason).find(([, v]) => v === outcome.code)?.[0];
       throw new Error(`Terminal disconnect: ${name ?? outcome.code}`);
     }
-    // restartRequired (515), connectionLost, 428 rate-limit, etc — back off and
-    // retry. Exponential (0.5s, 1s, 2s, 4s) so we don't machine-gun the server.
+    // A 428 close means the server is rate-limiting new sessions: every further
+    // dial in this loop deepens the block. One strike and out — fall through to
+    // the cooldown-arming path below instead of dialing up to 4 more times.
+    if (outcome.code === DisconnectReason.connectionClosed) break;
+    // restartRequired (515), connectionLost, etc — back off and retry.
+    // Exponential (0.5s, 1s, 2s, 4s) so we don't machine-gun the server.
     await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
   }
 
@@ -1492,7 +1496,28 @@ async function cmdWatch(args) {
   }, 500);
 
   let attempt = 0;
+  let rateLimitStrikes = 0;
   while (!shuttingDown) {
+    // Creds-gate: a watcher with no pairable credentials can NEVER connect, so
+    // every dial would be pure server-poking (this exact loop, credential-less,
+    // is what earned the July 428 block). Fail closed and wait for a human
+    // QR re-pair (`whatsapp auth`) — pairing is auth's job, never the watcher's.
+    // Missing file and registered:false are the two known-doomed states; an
+    // unrecognised creds shape falls through to a normal dial.
+    let gateCreds = null;
+    try {
+      gateCreds = JSON.parse(await readFile(join(AUTH_DIR, "creds.json"), "utf8"));
+    } catch {}
+    if (!gateCreds || gateCreds.registered === false) {
+      writeEvent({ t: Date.now(), event: "pairing_required" });
+      console.error(
+        "[watch] no registered credentials — QR re-pair needed (`whatsapp auth`). " +
+          "Exiting without dialing; retrying cannot succeed.",
+      );
+      removePidFile();
+      logStream.end(() => process.exit(3));
+      return;
+    }
     try {
       console.error(`[watch] opening socket (attempt ${attempt + 1})…`);
       const sock = await openSocket();
@@ -1505,6 +1530,7 @@ async function cmdWatch(args) {
       watchdogSock = sock;
       touch();
       writeEvent({ t: Date.now(), event: "connected" });
+      rateLimitStrikes = 0;
 
       sock.ev.on("messages.upsert", (evt) => {
         touch();
@@ -1621,11 +1647,41 @@ async function cmdWatch(args) {
     } catch (err) {
       writeEvent({ t: Date.now(), event: "error", message: String(err?.message ?? err) });
       console.error(`[watch] error: ${err?.message ?? err}`);
-      if (String(err?.message ?? "").includes("Terminal disconnect")) {
+      const errMsg = String(err?.message ?? "");
+      if (errMsg.includes("Terminal disconnect")) {
         console.error("[watch] terminal failure (logged out?). Exiting — re-auth required.");
         removePidFile();
         logStream.end(() => process.exit(2));
         return;
+      }
+      // Rate-limit circuit breaker. Retrying into a 428 (or its local cooldown)
+      // on the generic 60s backoff is what turns a soft-block into a standing
+      // one — each attempt resets WhatsApp's timer. Instead: sleep out the full
+      // cooldown (+jitter), and after 3 consecutive strikes stop entirely and
+      // hand off to the watchdog/human.
+      if (errMsg.startsWith("WhatsApp rate-limit")) {
+        rateLimitStrikes++;
+        if (rateLimitStrikes >= 3) {
+          writeEvent({ t: Date.now(), event: "rate_limit_giveup", strikes: rateLimitStrikes });
+          console.error(
+            "[watch] rate-limited 3 times in a row — exiting rather than extending the block. " +
+              "Wait for quiet time, then restart the watcher.",
+          );
+          removePidFile();
+          logStream.end(() => process.exit(2));
+          return;
+        }
+        let until = Date.now() + COOLDOWN_MS;
+        try {
+          const v = Number(await readFile(COOLDOWN_FILE, "utf8"));
+          if (Number.isFinite(v)) until = Math.max(until, v);
+        } catch {}
+        const wait = Math.max(60_000, until - Date.now()) + Math.round(Math.random() * 120_000);
+        console.error(
+          `[watch] rate-limited (strike ${rateLimitStrikes}/3) — sleeping ${Math.round(wait / 60000)} min for the cooldown to clear`,
+        );
+        await new Promise((r) => setTimeout(r, wait));
+        continue;
       }
     }
     // Exponential backoff, capped, with full jitter. Jitter de-synchronises the
