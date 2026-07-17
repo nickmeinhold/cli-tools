@@ -316,45 +316,36 @@ async function pickMeetupDate(page, dateStr) {
 }
 
 // ── Meetup: list a group's events ────────────────────────────────────────────
-// Ported from events-mcp meetup_list_events; its [id^="event-card"] selector is
-// stale. Same robust idiom as luma list: each event is an <a> to /events/<id>;
-// walk up to the card and read its text ([Manage, <status>, title, "Sat, Jul 11
-// · 3:00 PM AEST", venue]). Probed live 2026-07-04.
-//   social meetup list --group <url-name>
+// GET the group's events off /gql2 (getUpcomingGroupEvents; --past for
+// getPastGroupEvents). Returns structured JSON — real dateTime/venue/status/
+// going-count fields, vs the positional card-text guessing the DOM scrape did.
+//   social meetup list --group <url-name> [--past]
 async function harvestMeetupList(page, opts) {
   const group = typeof opts.group === "string" ? opts.group : "";
   if (!group) return { error: "pass --group <url-name> (the meetup.com/<url-name> slug)" };
-  await page.goto(`https://www.meetup.com/${group}/events/`, { waitUntil: "domcontentloaded" });
-  return page.evaluate(async ({ group, limit }) => {
-    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-    await wait(4500);
-    const isStatus = (s) => /^(Manage|Going|Not Going|Attending|Waitlist(ed)?|Host|You're going|·)$/i.test(s);
-    const isWhen = (s) => /\b\w{3},\s\w{3}\s\d{1,2}\b/.test(s) || /\d{1,2}:\d{2}\s?(AM|PM)\b/i.test(s);
-    const seen = new Set();
-    const out = [];
-    for (const a of document.querySelectorAll(`a[href*="/${group}/events/"]`)) {
-      if (out.length >= limit) break;
-      const m = (a.getAttribute("href") || "").match(/\/events\/(\d+)/);
-      if (!m) continue;
-      const id = m[1];
-      if (seen.has(id)) continue;
-      let card = a;
-      for (let i = 0; i < 8 && card.parentElement; i++) {
-        card = card.parentElement;
-        if ((card.innerText || "").split("\n").filter((l) => l.trim()).length >= 3) break;
-      }
-      const lines = (card.innerText || "").split("\n").map((s) => s.trim()).filter(Boolean);
-      if (lines.length < 2) continue;
-      seen.add(id);
-      const when = lines.find(isWhen) || "";
-      const title = lines.find((l) => !isStatus(l) && l !== when && !isWhen(l) && l.length > 3) || "";
-      let venue = "";
-      const wi = lines.indexOf(when);
-      if (wi >= 0) { for (const l of lines.slice(wi + 1)) { if (l === "·" || isStatus(l)) continue; venue = l; break; } }
-      out.push({ id, title, when, venue, url: `https://www.meetup.com/${group}/events/${id}/` });
-    }
-    return { records: out };
-  }, { group, limit: opts.limit });
+  const past = opts.past === true || opts.past === "true";
+  // The persisted query returns events on one side of a boundary datetime, sorted
+  // FROM that boundary — so the boundary must be "now" (a wide window backfires:
+  // afterDateTime far in the past returns the oldest events first, not upcoming).
+  const now = new Date().toISOString();
+  const vars = past
+    ? { urlname: group, beforeDateTime: now }
+    : { urlname: group, afterDateTime: now };
+  const data = await meetupGql(page, past ? "getPastGroupEvents" : "getUpcomingGroupEvents", past ? MEETUP_GQL.past : MEETUP_GQL.upcoming, vars);
+  const conn = data.groupByUrlname?.events;
+  if (!conn) return { error: `group "${group}" not found or has no events (no groupByUrlname.events in response)` };
+  const out = (conn.edges || []).map((e) => {
+    const n = e.node || {};
+    return {
+      id: n.id, title: n.title, url: n.eventUrl,
+      dateTime: n.dateTime || "", endTime: n.endTime || "",
+      status: n.status || "", isOnline: !!n.isOnline, eventType: n.eventType || "",
+      venue: n.venue?.name || "", going: n.going?.totalCount ?? n.going ?? null,
+    };
+  });
+  const res = { records: out.slice(0, opts.limit) };
+  if (conn.pageInfo?.hasNextPage && out.length < conn.totalCount) res.note = `showing ${Math.min(out.length, opts.limit)} of ${conn.totalCount} (more pages exist; pagination not yet wired)`;
+  return res;
 }
 
 // ── Meetup: internal GraphQL API (www.meetup.com/gql2) ───────────────────────
@@ -368,10 +359,12 @@ async function harvestMeetupList(page, opts) {
 // Hashes captured live 2026-07-17. If one rotates, re-sniff /gql2 while doing the
 // op in the browser and update here.
 const MEETUP_GQL = {
-  self:   "ecb7cde0ca30e735fb9fbb974c97af006bc6a529d8606ed4c4f455f67f1151ac",
-  group:  "00e56ef3f5985d81b05cae3368bf56f075bb626e487af85cb2e95e556ae6dd9d",
-  create: "f87bdba1d5607423af919b25a558c2b6be7a1e308bd596ac871f1aee3c028cc6",
-  delete: "ff2b6bc1d3ec1ba870d19e50a0d22c69fd6ad47668650df5ad43bebccbd91447",
+  self:     "ecb7cde0ca30e735fb9fbb974c97af006bc6a529d8606ed4c4f455f67f1151ac",
+  group:    "00e56ef3f5985d81b05cae3368bf56f075bb626e487af85cb2e95e556ae6dd9d",
+  create:   "f87bdba1d5607423af919b25a558c2b6be7a1e308bd596ac871f1aee3c028cc6",
+  delete:   "ff2b6bc1d3ec1ba870d19e50a0d22c69fd6ad47668650df5ad43bebccbd91447",
+  upcoming: "066e3709c68718d5ce9dd909e979ac70f99835fb3722cef77756ded808d5ca08", // getUpcomingGroupEvents
+  past:     "321388b1e4a11b17a57efe3ae7a90abfecbc703a4f4e99519772294924c21351", // getPastGroupEvents
 };
 async function meetupGql(page, operationName, sha256Hash, variables) {
   if (!page.url().startsWith("https://www.meetup.com")) {
@@ -1059,7 +1052,7 @@ events (create/manage across luma + meetup — folded in from events-mcp):
   luma edit --event evt-… [--title --description --start --start-time --end-time --location]
   luma change-photo --event evt-… (--search tech | --category Tech | --file /abs.jpg)
   luma delete --event evt-…
-  meetup list --group X                       list a group's events
+  meetup list --group X [--past]              list a group's upcoming (or past) events
   meetup create --group X --title X --date 2026-07-19 --description "…" [--start-time --end-time --venue-id --publish]
   meetup edit --group X --event <id> [--title --description --date --start-time --location --publish]
   meetup delete --group X --event <id>
