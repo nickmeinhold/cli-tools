@@ -48,7 +48,7 @@ const BACKENDS = {
     storage: "meetup",
     authUrl: "https://www.meetup.com/login/",
     origin: "https://www.meetup.com/",
-    commands: { members: harvestMeetupMembers, list: harvestMeetupList, create: harvestMeetupCreate, edit: harvestMeetupEdit, delete: harvestMeetupDelete, messages: harvestMeetupMessages },
+    commands: { members: harvestMeetupMembers, list: harvestMeetupList, create: harvestMeetupCreate, edit: harvestMeetupEdit, delete: harvestMeetupDelete, messages: harvestMeetupMessages, dm: harvestMeetupDm },
   },
   luma: {
     storage: "luma",
@@ -267,6 +267,51 @@ async function harvestMeetupMessages(page, opts) {
   return { records: out.slice(0, opts.limit) };
 }
 
+// ── Meetup: send a 1:1 DM ────────────────────────────────────────────────────
+// Send ONE message to ONE member: createConversation({members:[id]}) then
+// createMessage({convoId,text}) (captured live 2026-07-17). Resolve the recipient
+// by numeric --member, or by --name via getPeers (people you're ALLOWED to DM).
+//
+// Deliberately single-recipient and NOT batchable: bulk member DMs are what
+// Meetup's spam systems police — to message a whole event's attendees use the
+// sanctioned broadcast instead (Meetup's "Contact"/"Announce" — not yet wired;
+// see the follow-up task). This tool FAILS CLOSED: it verifies the recipient
+// carries the MESSAGE allowable-action (Meetup's per-recipient DM gate) and
+// requires --confirm, since a send is irreversible.
+//   social meetup dm --member <id> --text "…" --confirm
+//   social meetup dm --name "Jane Doe" --text "…" --confirm   (errors if the name is ambiguous)
+async function harvestMeetupDm(page, opts) {
+  const text = typeof opts.text === "string" ? opts.text : "";
+  if (!text.trim()) return { error: 'pass --text "your message"' };
+  let memberId = opts.member ? String(opts.member) : "";
+  let memberName = "";
+
+  // Resolve by name via getPeers (only returns people you're allowed to message).
+  if (!memberId && typeof opts.name === "string" && opts.name) {
+    const pd = await meetupGql(page, "getPeers", MEETUP_GQL.peers, { name: opts.name });
+    const cands = (pd.peers?.edges || []).map((e) => e.node).filter(Boolean);
+    const exact = cands.filter((n) => (n.name || "").toLowerCase() === opts.name.toLowerCase());
+    const pick = exact.length ? exact : cands;
+    if (pick.length === 0) return { error: `no messageable member matches --name "${opts.name}"` };
+    if (pick.length > 1) return { error: `--name "${opts.name}" is ambiguous (${pick.map((n) => `${n.name} [${n.id}]`).join(", ")}) — pass --member <id>` };
+    memberId = String(pick[0].id); memberName = pick[0].name || "";
+    if (!(pick[0].allowableActions || []).includes("MESSAGE")) return { error: `${memberName} [${memberId}] can't be DM'd (no MESSAGE action — they haven't unlocked DMs or have blocked/limited messaging)` };
+  }
+  if (!/^\d+$/.test(memberId)) return { error: "pass --member <numeric-id> or --name \"Full Name\"" };
+  if (opts.confirm !== true && opts.confirm !== "true") return { error: `refusing to send unconfirmed. This DMs member ${memberId}${memberName ? ` (${memberName})` : ""}: "${text.slice(0, 80)}${text.length > 80 ? "…" : ""}". Re-run with --confirm.` };
+
+  const conv = await meetupGql(page, "createConversation", MEETUP_GQL.newConvo, { members: [memberId] });
+  const convoId = conv.createConversation?.conversation?.id;
+  if (conv.createConversation?.error) return { error: `createConversation failed: ${JSON.stringify(conv.createConversation.error)}` };
+  if (!convoId) return { error: `createConversation returned no id: ${JSON.stringify(conv).slice(0, 200)}` };
+
+  const sent = await meetupGql(page, "createMessage", MEETUP_GQL.sendMsg, { convoId, text });
+  const msg = sent.sendDirectMessage?.message || sent.createMessage?.message;
+  if (!msg?.id) return { error: `message not confirmed sent: ${JSON.stringify(sent).slice(0, 200)}` };
+  if (msg.text !== text) return { error: `sent, but readback text differs: "${msg.text}" ≠ "${text}" (convo ${convoId})` };
+  return { records: [{ convoId, messageId: msg.id, to: memberId, toName: memberName, text: msg.text }], note: `DM sent (verified): ${memberName || memberId}` };
+}
+
 async function harvestMeetupMembers(page, opts) {
   if (!opts.group) return { error: "pass --group <urlname> (e.g. ai-ml-robots — the meetup.com/<urlname> slug)" };
   await page.goto(BACKENDS.meetup.origin, { waitUntil: "domcontentloaded" });
@@ -402,6 +447,9 @@ const MEETUP_GQL = {
   past:     "321388b1e4a11b17a57efe3ae7a90abfecbc703a4f4e99519772294924c21351", // getPastGroupEvents
   convos:   "16fd50768bfbf38f2908459d37ed021b034834f0caeda5825d7d20c76f6b0627", // getConversations
   convo:    "8a7f9db7a4b7a6f153ce65c274506634c61cf30fed25c1d35fdad9b9a1d09d1d", // getConversation
+  peers:    "badbc16fa95f2b638a3cc03c3185629d68e28afd826267626fff52649f01d89d", // getPeers (search members you can DM)
+  newConvo: "3c2e28d5a26d7352993ee6fc222bcdf0b731ac1c8228ce84de96f07ca9fc7d8c", // createConversation
+  sendMsg:  "729992e9b2b5cd3730de300d0e8e67514cfa60fd2b3abfe37b9d4271b10e47d0", // createMessage → sendDirectMessage
 };
 async function meetupGql(page, operationName, sha256Hash, variables) {
   if (!page.url().startsWith("https://www.meetup.com")) {
