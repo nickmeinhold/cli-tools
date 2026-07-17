@@ -357,96 +357,151 @@ async function harvestMeetupList(page, opts) {
   }, { group, limit: opts.limit });
 }
 
+// ── Meetup: internal GraphQL API (www.meetup.com/gql2) ───────────────────────
+// Meetup's React app talks to /gql2 with Apollo *Automatic Persisted Queries*:
+// requests carry only the operationName + variables + a sha256 hash of the query
+// text (never the text itself). The server already knows these hashes because
+// the live app just used them, so hash-only replay works — until Meetup ships a
+// new build and the hashes rotate, which surfaces as `PersistedQueryNotFound`.
+// That's a LOUD, recoverable failure (re-capture the hashes), unlike the SILENT
+// selector rot the DOM flow suffered (create dropped --location without a peep).
+// Hashes captured live 2026-07-17. If one rotates, re-sniff /gql2 while doing the
+// op in the browser and update here.
+const MEETUP_GQL = {
+  self:   "ecb7cde0ca30e735fb9fbb974c97af006bc6a529d8606ed4c4f455f67f1151ac",
+  group:  "00e56ef3f5985d81b05cae3368bf56f075bb626e487af85cb2e95e556ae6dd9d",
+  create: "f87bdba1d5607423af919b25a558c2b6be7a1e308bd596ac871f1aee3c028cc6",
+  delete: "ff2b6bc1d3ec1ba870d19e50a0d22c69fd6ad47668650df5ad43bebccbd91447",
+};
+async function meetupGql(page, operationName, sha256Hash, variables) {
+  if (!page.url().startsWith("https://www.meetup.com")) {
+    await page.goto("https://www.meetup.com/", { waitUntil: "domcontentloaded" });
+    await page.waitForTimeout(1200);
+  }
+  const res = await page.evaluate(async ({ operationName, sha256Hash, variables }) => {
+    const r = await fetch("https://www.meetup.com/gql2", {
+      method: "POST", credentials: "include",
+      headers: { "content-type": "application/json", "apollographql-client-name": "nextjs-web" },
+      body: JSON.stringify({ operationName, variables, extensions: { persistedQuery: { version: 1, sha256Hash } } }),
+    });
+    let json = null; try { json = await r.json(); } catch {}
+    return { status: r.status, json };
+  }, { operationName, sha256Hash, variables });
+  const errs = res.json?.errors;
+  if (errs?.length) {
+    if (errs.some((e) => /PersistedQueryNotFound/.test(e.message || e.extensions?.classification || "")))
+      throw new Error(`Meetup ${operationName}: persisted-query hash rotated (PersistedQueryNotFound) — re-capture the /gql2 hash for ${operationName} and update MEETUP_GQL`);
+    throw new Error(`Meetup ${operationName} failed: ${errs.map((e) => e.message).join("; ")}`);
+  }
+  if (res.status !== 200 || !res.json?.data) throw new Error(`Meetup ${operationName} → HTTP ${res.status}: ${JSON.stringify(res.json).slice(0, 200)}`);
+  return res.json.data;
+}
+
 // ── Meetup: create an event ──────────────────────────────────────────────────
-// The organizer create form lives at meetup.com/<group>/schedule/ (events-mcp's
-// guessed /events/create/ 404s today), reachable by direct nav — no button/menu
-// dance. Real hooks probed live 2026-07-04: title=[data-testid=event-name-input],
-// time=[aria-label="Edit start time"], description=contenteditable,
-// location=input[placeholder="Search or add location..."], submit="Save as
-// draft" | "Publish". Defaults to a DRAFT (private) — pass --publish to go live.
-// Meetup REQUIRES a date to save even a draft; --date drives the calendar-picker
-// (see pickMeetupDate).
+// POST createEvent to /gql2 with the input the web form sends (captured live
+// 2026-07-17). Fails closed: bad inputs error before the call; the createEvent
+// response's own `errors` array gates success; the created event is read back
+// (public JSON-LD when published) and title/start diffed. Defaults to a DRAFT —
+// pass --publish to go live. NOTE: venue is set by numeric --venue-id only;
+// name→id resolution is a follow-up (Meetup's venue search wasn't cleanly
+// captured, and the DOM picker returned wrong-address venues anyway).
 //   social meetup create --group <url-name> --title "X" --date 2026-07-12
-//     [--description "…" --start-time 18:00 --location "…" --publish]
+//     [--description "…" --start-time 18:00 --end-time 20:00 --venue-id 12345 --publish]
 async function harvestMeetupCreate(page, opts) {
   const group = typeof opts.group === "string" ? opts.group : "";
   const title = typeof opts.title === "string" ? opts.title : "";
   const description = typeof opts.description === "string" ? opts.description : "";
-  // Meetup blocks the save unless title, date AND a non-empty description are set.
-  if (!group || !title || !opts.date || !description) return { error: 'pass --group <url-name> --title "Event name" --date YYYY-MM-DD --description "…" (Meetup requires all three; optional: --start-time 18:00 --location "…" --publish)' };
-  await page.goto(`https://www.meetup.com/${group}/schedule/`, { waitUntil: "domcontentloaded" });
-  await page.waitForTimeout(2500);
-  // A OneTrust privacy-preference dialog (appeared ~2026-07) stacks ON TOP of
-  // the Start-from modal and intercepts all clicks — settle it first (its
-  // choice persists into the saved session, so this is usually one-time).
-  const consent = page.getByRole("button", { name: "Confirm My Choices" }).first();
-  if (await consent.isVisible().catch(() => false)) { await consent.click(); await page.waitForTimeout(1500); }
-  // Meetup opens /schedule/ behind a "Start from" modal (Duplicate last event /
-  // Start from scratch) whose blur overlay intercepts ALL form input — the
-  // silent-failure culprit. Dismiss it before touching the form.
-  const scratch = page.getByRole("button", { name: "Start from scratch" }).first();
-  if (await scratch.isVisible().catch(() => false)) { await scratch.click(); await page.waitForTimeout(2000); }
-  const titleInput = page.locator('[data-testid="event-name-input"]');
-  await titleInput.waitFor({ timeout: 15000 });
-  await titleInput.fill(title);
-
-  // Description is a ProseMirror rich-text editor — it ignores .fill(), and there
-  // are two instances where the FIRST is hidden. Target the visible one and TYPE
-  // so the editor's model actually updates (empty description → save blocked).
-  const eds = page.locator("div.ProseMirror");
-  const nEds = await eds.count();
-  for (let i = 0; i < nEds; i++) {
-    const ed = eds.nth(i);
-    if (await ed.isVisible().catch(() => false)) {
-      // insertText dispatches the whole string as ONE input event — fast, and
-      // ProseMirror still updates its model (char-by-char typing times out on
-      // long descriptions).
-      await ed.click();
-      await page.keyboard.insertText(description);
-      break;
-    }
-  }
-  const st = opts["start-time"] || opts.startTime;
-  if (st) {
-    const timeInput = page.locator('[aria-label="Edit start time"]').first();
-    if (await timeInput.isVisible().catch(() => false)) { await timeInput.fill(String(st)); await page.keyboard.press("Escape").catch(() => {}); }
-  }
-  if (typeof opts.date === "string" && opts.date) {
-    const r = await pickMeetupDate(page, opts.date);
-    if (!r.ok) return { error: r.err };
-  }
-  if (typeof opts.location === "string" && opts.location) {
-    const loc = page.locator('input[placeholder="Search or add location..."]').first();
-    if (await loc.isVisible().catch(() => false)) {
-      await loc.fill(opts.location); await page.waitForTimeout(1500);
-      const opt = page.locator('[role="option"]').first();
-      if (await opt.isVisible().catch(() => false)) await opt.click();
-    }
-  }
-
+  if (!group || !title || !opts.date || !description) return { error: 'pass --group <url-name> --title "Event name" --date YYYY-MM-DD --description "…" (all three required; optional: --start-time 18:00 --end-time 20:00 --venue-id 12345 --publish)' };
+  const day = parseLumaDay(String(opts.date)); // reuse the ISO/"26 July 2026"/"Sat 5 Jul" parser
+  if (!day) return { error: `could not parse --date "${opts.date}" (use "2026-07-26")` };
+  const st = String(opts["start-time"] || opts.startTime || "18:00");
+  const et = String(opts["end-time"] || opts.endTime || "");
+  if (!/^\d{1,2}:\d{2}$/.test(st) || (et && !/^\d{1,2}:\d{2}$/.test(et))) return { error: "--start-time/--end-time must be HH:MM (24h)" };
+  const pad = (n) => String(n).padStart(2, "0");
+  const startDateTime = `${day.y}-${pad(day.mo)}-${pad(day.d)}T${st}`; // wall-clock in the group's timezone (no offset)
+  const [sh, sm] = st.split(":").map(Number);
+  const [eh, em] = et ? et.split(":").map(Number) : [sh + 2, sm];
+  let mins = (eh * 60 + em) - (sh * 60 + sm); if (mins <= 0) mins += 24 * 60;
+  const duration = `PT${Math.floor(mins / 60)}H${mins % 60}M0S`;
   const publish = opts.publish === true || opts.publish === "true";
-  const btnName = publish ? "Publish" : "Save as draft";
-  const submit = page.getByRole("button", { name: btnName }).first();
-  await submit.waitFor({ timeout: 5000 });
-  await submit.click();
-  await page.waitForTimeout(5000);
-  const url = page.url();
-  const m = url.match(/\/events\/(\d+)/);
-  // A successful save navigates AWAY from /schedule/ — to the event page
-  // (/events/<id>) when published, or to /events/drafts/ when saved as a draft.
-  // Still on /schedule/ = Meetup rejected the form; report the real state instead
-  // of a false success (acknowledgement ≠ effect).
-  if (/\/schedule\/?($|\?)/.test(url) && !m) {
-    return { error: `save blocked — Meetup rejected the form (a required field didn't register). Still on /schedule/. Check title/date/description.` };
+
+  const self = await meetupGql(page, "getSelf", MEETUP_GQL.self, {});
+  const selfId = Number(self.self?.id);
+  if (!selfId) return { error: "could not resolve your Meetup member id (getSelf) — stale session? re-run `social auth meetup`" };
+
+  const input = {
+    groupUrlname: group, title, description, duration, startDateTime,
+    publishStatus: publish ? "PUBLISHED" : "DRAFT",
+    eventHosts: [selfId], featuredPhotoId: null,
+    fundraising: { enabled: false }, question: "",
+    rsvpSettings: { guestLimit: 0, rsvpOpenDuration: "PT0S", rsvpCloseDuration: "PT0S", rsvpLimit: 0 },
+    topics: [], isCopy: false,
+  };
+  if (opts["venue-id"] || opts.venueId) input.venueId = String(opts["venue-id"] || opts.venueId);
+
+  const data = await meetupGql(page, "createEvent", MEETUP_GQL.create, { input });
+  const ev = data.createEvent?.event;
+  const cerrs = data.createEvent?.errors;
+  if (cerrs?.length) return { error: `createEvent rejected: ${cerrs.map((e) => e.message || JSON.stringify(e)).join("; ")}` };
+  if (!ev?.id) return { error: `createEvent returned no event: ${JSON.stringify(data).slice(0, 200)}` };
+  const rec = { id: ev.id, url: ev.eventUrl, title: ev.title, published: publish };
+
+  // Read back. Published events are public → verify title+start via JSON-LD.
+  // Drafts aren't public; the mutation response (title + no errors) is the gate.
+  if (publish) {
+    // The public page/CDN lags the mutation by a few seconds — retry before
+    // treating an absent JSON-LD as failure (else every publish false-negatives).
+    let rb = null;
+    for (let i = 0; i < 5; i++) {
+      rb = await meetupPublicEvent(ev.eventUrl);
+      if (!rb.error) break;
+      await page.waitForTimeout(2000);
+    }
+    if (rb.error) return { error: `event ${ev.id} created but public readback failed after retries: ${rb.error} — inspect ${ev.eventUrl}`, records: [rec] };
+    const mismatch = [];
+    if (rb.name !== title) mismatch.push(`title "${rb.name}" ≠ "${title}"`);
+    if (rb.startLocal && rb.startLocal.slice(0, 16) !== startDateTime) mismatch.push(`start ${rb.startLocal} ≠ ${startDateTime}`);
+    if (mismatch.length) return { error: `event ${ev.id} published but readback mismatched: ${mismatch.join("; ")} — inspect ${ev.eventUrl}`, records: [rec] };
+    rec.start_at = rb.startLocal; rec.venue = rb.venue;
   }
-  return { records: [{ title, id: m ? m[1] : "", url, published: publish }], note: `Meetup event ${publish ? "published" : "saved as draft"}: ${url}` };
+  return { records: [rec], note: `Meetup event ${publish ? "published (verified)" : "saved as draft"}: ${ev.eventUrl}${!publish ? " — draft not publicly verifiable" : ""}` };
+}
+
+// Fetch a PUBLIC Meetup event page and read its schema.org JSON-LD (stabler than
+// scraping the React DOM). Returns { name, startLocal, endLocal, venue } or { error }.
+async function meetupPublicEvent(url) {
+  const res = await fetch(url).catch((e) => ({ error: String(e) }));
+  if (res.error) return { error: res.error };
+  if (!res.ok) return { error: `HTTP ${res.status}` };
+  const html = await res.text();
+  for (const m of html.matchAll(/<script type="application\/ld\+json">(.*?)<\/script>/gs)) {
+    let j; try { j = JSON.parse(m[1]); } catch { continue; }
+    for (const o of (Array.isArray(j) ? j : [j])) {
+      if (o && /Event/i.test(String(o["@type"] || ""))) {
+        return {
+          name: o.name || "",
+          startLocal: String(o.startDate || "").replace(/([+-]\d{2}:\d{2}|Z)$/, ""), // strip offset → wall-clock
+          endLocal: String(o.endDate || "").replace(/([+-]\d{2}:\d{2}|Z)$/, ""),
+          venue: o.location?.name || "",
+        };
+      }
+    }
+  }
+  return { error: "no Event JSON-LD on the public page (still a draft, or not published?)" };
 }
 
 // ── Meetup: edit an event ────────────────────────────────────────────────────
+// STILL DOM-DRIVEN (create + delete are on /gql2; edit is not yet). Meetup's
+// editEvent mutation is a FULL-REPLACE (its input carries every field), so a
+// safe API port needs a single-event read query to preserve untouched fields —
+// not captured yet. Until then this drives the form, and its field-set is
+// best-effort: a silently-skipped field is a known gap (see the create bug that
+// motivated the port). Verify edits on the public page after. Follow-up: capture
+// the get-event query hash, then port to read-modify-write like `luma edit`.
 // The edit form at /events/<id>/edit/ mirrors the create form (same hooks) but
 // has NO "Start from scratch" modal. Only provided fields are touched. Description
 // is the visible ProseMirror — select-all + delete before insertText to replace.
-// Probed live 2026-07-04. Saves via "Save as draft" (default) or "Publish".
+// Saves via "Save as draft" (default) or "Publish".
 //   social meetup edit --group <url-name> --event <numeric-id> [--title "…"
 //     --description "…" --date YYYY-MM-DD --start-time 18:00 --location "…" --publish]
 async function harvestMeetupEdit(page, opts) {
@@ -500,32 +555,20 @@ async function harvestMeetupEdit(page, opts) {
 }
 
 // ── Meetup: delete an event ──────────────────────────────────────────────────
-// Delete lives behind the event page's "More" menu → "Delete event" → a confirm
-// modal ("Delete this event? … permanently delete …" / Confirm | Cancel). For
-// DRAFTS use Delete; published events with attendees use "Cancel event" instead.
-// Probed live 2026-07-04. Confirm match is exact to dodge the OneTrust cookie
-// banner's "Confirm My Choices".
+// POST deleteEvent to /gql2 (captured live 2026-07-17). Returns {success, errors};
+// success is gated on the boolean, not just HTTP 200. Works for drafts and
+// published events alike (the DOM flow needed different menus for each).
 //   social meetup delete --group <url-name> --event <numeric-id>  (or --url <event url>)
 async function harvestMeetupDelete(page, opts) {
   const group = typeof opts.group === "string" ? opts.group : "";
   let id = typeof opts.event === "string" ? opts.event : (typeof opts.id === "string" ? opts.id : "");
   if (!id && typeof opts.url === "string") { const m = opts.url.match(/\/events\/(\d+)/); if (m) id = m[1]; }
-  if (!group || !/^\d+$/.test(String(id))) return { error: "pass --group <url-name> --event <numeric-id> (or --url <event url>)" };
-  await page.goto(`https://www.meetup.com/${group}/events/${id}/`, { waitUntil: "domcontentloaded" });
-  await page.waitForTimeout(3500);
-  const more = page.getByRole("button", { name: "More" }).first();
-  if (!(await more.isVisible().catch(() => false))) return { error: `no "More" menu on event ${id} — not found, or not an event you manage?` };
-  await more.click();
-  await page.waitForTimeout(1200);
-  const del = page.getByRole("menuitem", { name: "Delete event" }).first();
-  if (!(await del.isVisible().catch(() => false))) return { error: `no "Delete event" option for event ${id} (published events use "Cancel event", not Delete).` };
-  await del.click();
-  await page.waitForTimeout(2000);
-  const confirm = page.getByRole("button", { name: "Confirm", exact: true }).first();
-  await confirm.waitFor({ timeout: 5000 });
-  await confirm.click();
-  await page.waitForTimeout(3000);
-  return { records: [{ id, deleted: true }], note: `Meetup event deleted: ${id}` };
+  if (!/^\d+$/.test(String(id))) return { error: "pass --event <numeric-id> (or --url <event url>)" };
+  const data = await meetupGql(page, "deleteEvent", MEETUP_GQL.delete, { input: { eventId: String(id), removeFromCalendar: true, updateSeries: false } });
+  const d = data.deleteEvent;
+  if (d?.errors?.length) return { error: `deleteEvent rejected: ${d.errors.map((e) => e.message || JSON.stringify(e)).join("; ")}` };
+  if (!d?.success) return { error: `deleteEvent did not report success: ${JSON.stringify(data).slice(0, 200)}` };
+  return { records: [{ id: String(id), deleted: true }], note: `Meetup event deleted (verified): ${id}` };
 }
 
 // ── Luma: internal API (api.luma.com) ────────────────────────────────────────
@@ -1017,7 +1060,7 @@ events (create/manage across luma + meetup — folded in from events-mcp):
   luma change-photo --event evt-… (--search tech | --category Tech | --file /abs.jpg)
   luma delete --event evt-…
   meetup list --group X                       list a group's events
-  meetup create --group X --title X --date 2026-07-19 --description "…" [--start-time --location --publish]
+  meetup create --group X --title X --date 2026-07-19 --description "…" [--start-time --end-time --venue-id --publish]
   meetup edit --group X --event <id> [--title --description --date --start-time --location --publish]
   meetup delete --group X --event <id>
   sync --from <event-url> --to luma|meetup [--group X] [--publish]   mirror an event across platforms
