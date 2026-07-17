@@ -48,7 +48,7 @@ const BACKENDS = {
     storage: "meetup",
     authUrl: "https://www.meetup.com/login/",
     origin: "https://www.meetup.com/",
-    commands: { members: harvestMeetupMembers, list: harvestMeetupList, create: harvestMeetupCreate, edit: harvestMeetupEdit, delete: harvestMeetupDelete },
+    commands: { members: harvestMeetupMembers, list: harvestMeetupList, create: harvestMeetupCreate, edit: harvestMeetupEdit, delete: harvestMeetupDelete, messages: harvestMeetupMessages },
   },
   luma: {
     storage: "luma",
@@ -232,6 +232,41 @@ async function enrichFacebookProfiles(page, opts) {
 // `ai-ml-robots`. UNVERIFIED until run against a real `social auth meetup` session:
 // the GraphQL schema (field names, memberships input args) is a best-effort guess —
 // run with `--raw` on the first authed call to dump the live response and correct it.
+// ── Meetup: your DM inbox ────────────────────────────────────────────────────
+// GET getConversations off /gql2 — your 1:1 message threads (your own data).
+// Read-only. --convo <id> reads one thread's messages via getConversation.
+//   social meetup messages [--limit 20]
+//   social meetup messages --convo <conversation-id>
+async function harvestMeetupMessages(page, opts) {
+  const SELF = await meetupGql(page, "getSelf", MEETUP_GQL.self, {}).then((d) => d.self?.id).catch(() => null);
+  if (opts.convo) {
+    const data = await meetupGql(page, "getConversation", MEETUP_GQL.convo, { convoId: String(opts.convo) });
+    const node = data.conversations?.edges?.[0]?.node;
+    if (!node) return { error: `conversation ${opts.convo} not found` };
+    const msgs = (node.msgs?.edges || node.lastMessage?.edges || []).map((e) => {
+      const m = e.node || {};
+      return { id: m.id, from: m.member?.id === SELF ? "you" : (m.member?.name || m.member?.id || ""), text: m.text || "", at: m.created || "", read: !!m.read };
+    });
+    return { records: msgs.slice(0, opts.limit) };
+  }
+  const data = await meetupGql(page, "getConversations", MEETUP_GQL.convos, { status: "ACTIVE" });
+  const out = (data.conversations?.edges || []).map((e) => {
+    const n = e.node || {};
+    const other = (n.members || []).find((m) => String(m.id) !== String(SELF)) || (n.members || [])[0] || {};
+    const last = n.lastMessage?.edges?.[0]?.node;
+    return {
+      convoId: n.id,
+      with: other.name || "",
+      withId: other.id || "",
+      canMessage: (other.allowableActions || []).includes("MESSAGE"),
+      unread: !!n.hasUnreadMessages,
+      lastAt: n.lastMessageDate || "",
+      lastText: last?.text ? String(last.text).slice(0, 120) : "",
+    };
+  });
+  return { records: out.slice(0, opts.limit) };
+}
+
 async function harvestMeetupMembers(page, opts) {
   if (!opts.group) return { error: "pass --group <urlname> (e.g. ai-ml-robots — the meetup.com/<urlname> slug)" };
   await page.goto(BACKENDS.meetup.origin, { waitUntil: "domcontentloaded" });
@@ -365,6 +400,8 @@ const MEETUP_GQL = {
   delete:   "ff2b6bc1d3ec1ba870d19e50a0d22c69fd6ad47668650df5ad43bebccbd91447",
   upcoming: "066e3709c68718d5ce9dd909e979ac70f99835fb3722cef77756ded808d5ca08", // getUpcomingGroupEvents
   past:     "321388b1e4a11b17a57efe3ae7a90abfecbc703a4f4e99519772294924c21351", // getPastGroupEvents
+  convos:   "16fd50768bfbf38f2908459d37ed021b034834f0caeda5825d7d20c76f6b0627", // getConversations
+  convo:    "8a7f9db7a4b7a6f153ce65c274506634c61cf30fed25c1d35fdad9b9a1d09d1d", // getConversation
 };
 async function meetupGql(page, operationName, sha256Hash, variables) {
   if (!page.url().startsWith("https://www.meetup.com")) {
@@ -1056,6 +1093,8 @@ events (create/manage across luma + meetup — folded in from events-mcp):
   meetup create --group X --title X --date 2026-07-19 --description "…" [--start-time --end-time --venue-id --publish]
   meetup edit --group X --event <id> [--title --description --date --start-time --location --publish]
   meetup delete --group X --event <id>
+  meetup messages [--limit N]                your DM inbox (read-only)
+  meetup messages --convo <id>               read one conversation thread
   sync --from <event-url> --to luma|meetup [--group X] [--publish]   mirror an event across platforms
 discover (find people NOT yet in the social graph):
   social discover github      2nd-degree builder-graph crawl (who your people follow)
