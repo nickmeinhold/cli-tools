@@ -376,6 +376,11 @@ async function harvestMeetupCreate(page, opts) {
   if (!group || !title || !opts.date || !description) return { error: 'pass --group <url-name> --title "Event name" --date YYYY-MM-DD --description "…" (Meetup requires all three; optional: --start-time 18:00 --location "…" --publish)' };
   await page.goto(`https://www.meetup.com/${group}/schedule/`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(2500);
+  // A OneTrust privacy-preference dialog (appeared ~2026-07) stacks ON TOP of
+  // the Start-from modal and intercepts all clicks — settle it first (its
+  // choice persists into the saved session, so this is usually one-time).
+  const consent = page.getByRole("button", { name: "Confirm My Choices" }).first();
+  if (await consent.isVisible().catch(() => false)) { await consent.click(); await page.waitForTimeout(1500); }
   // Meetup opens /schedule/ behind a "Start from" modal (Duplicate last event /
   // Start from scratch) whose blur overlay intercepts ALL form input — the
   // silent-failure culprit. Dismiss it before touching the form.
