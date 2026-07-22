@@ -450,6 +450,7 @@ const MEETUP_GQL = {
   peers:    "badbc16fa95f2b638a3cc03c3185629d68e28afd826267626fff52649f01d89d", // getPeers (search members you can DM)
   newConvo: "3c2e28d5a26d7352993ee6fc222bcdf0b731ac1c8228ce84de96f07ca9fc7d8c", // createConversation
   sendMsg:  "729992e9b2b5cd3730de300d0e8e67514cfa60fd2b3abfe37b9d4271b10e47d0", // createMessage → sendDirectMessage
+  edit:     "c8cce79ad9b1e3f884fcee859bd37a7bab89b990fd56a4c0ae5affb5cdd4d6b7", // editEvent (full-replace)
 };
 async function meetupGql(page, operationName, sha256Hash, variables) {
   if (!page.url().startsWith("https://www.meetup.com")) {
@@ -582,54 +583,153 @@ async function meetupPublicEvent(url) {
 // Saves via "Save as draft" (default) or "Publish".
 //   social meetup edit --group <url-name> --event <numeric-id> [--title "…"
 //     --description "…" --date YYYY-MM-DD --start-time 18:00 --location "…" --publish]
+// Read the COMPLETE editable event object for a read-modify-write edit. editEvent
+// is a full-replace mutation, so a partial read (e.g. the getUpcomingGroupEvents
+// list node) would blank whatever it omits — guestLimit, topics, howToFindUs,
+// fundraising, rsvp settings. Meetup SSRs the full object into the edit page's
+// Apollo cache rather than exposing a single-event GraphQL read, so we load the
+// authenticated edit page and pull __APOLLO_STATE__["Event:<id>"] (deref'd).
+// Probed live 2026-07-22.
+async function meetupReadEventForEdit(page, group, id) {
+  await page.goto(`https://www.meetup.com/${group}/events/${id}/edit/`, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(6000);
+  const consent = page.getByRole("button", { name: "Confirm My Choices" }).first();
+  if (await consent.isVisible().catch(() => false)) { await consent.click(); await page.waitForTimeout(1200); }
+  const ev = await page.evaluate((eventId) => {
+    const nd = document.getElementById("__NEXT_DATA__");
+    let apollo = window.__APOLLO_STATE__;
+    if (!apollo && nd) { try { apollo = JSON.parse(nd.textContent)?.props?.pageProps?.__APOLLO_STATE__; } catch {} }
+    if (!apollo) return null;
+    const key = Object.keys(apollo).find((k) => k === `Event:${eventId}` || k.startsWith(`Event:${eventId}`));
+    if (!key) return null;
+    const deref = (r) => (r && r.__ref) ? apollo[r.__ref] : r;
+    const e = apollo[key];
+    // group timezone (for proNetworkEvents.timezone)
+    const gKey = Object.keys(apollo).find((k) => k.startsWith("Group:"));
+    return {
+      id: e.id, title: e.title, description: e.description,
+      dateTime: e.dateTime, endTime: e.endTime, duration: e.duration,
+      status: e.status, eventType: e.eventType,
+      eventHosts: (e.eventHosts || []).map(deref).map((h) => h && h.memberId).filter(Boolean),
+      venueId: deref(e.venue)?.id ?? null,
+      featuredPhotoId: deref(e.featuredEventPhoto)?.id ?? null,
+      feeEnabled: !!deref(e.feeSettings),
+      fundraisingEnabled: !!(deref(e.fundraising)?.enabled),
+      guestLimit: e.guestLimit ?? 0,
+      maxTickets: e.maxTickets ?? 0,
+      howToFindUs: e.howToFindUs ?? "",
+      question: ((e.rsvpQuestions || []).map(deref)[0]?.question) ?? "",
+      rsvpSurveyEnabled: !!deref(e.rsvpSurveySettings),
+      topics: ((e.topics && e.topics.edges) || []).map((x) => deref(x.node)?.id).filter(Boolean),
+      komootUrl: e.komootUrl ?? null,
+      isSeries: !!deref(e.series),
+      timezone: gKey ? apollo[gKey]?.timezone : "Australia/Melbourne",
+    };
+  }, String(id));
+  return ev;
+}
+
+// ── Meetup: edit an event ────────────────────────────────────────────────────
+// Read-modify-write on /gql2: read the COMPLETE current event (meetupReadEventForEdit,
+// from the edit page's Apollo cache), overlay ONLY the provided flags, POST editEvent
+// (a full-replace mutation, hash captured live 2026-07-17), then read back the public
+// JSON-LD and diff. Every unchanged field round-trips verbatim from the read — this is
+// what makes a full-replace safe (the old DOM flow silently dropped whatever the form
+// didn't re-fill). Known lossy edge: RSVP open/close *windows* aren't in the readable
+// cache, so they default to PT0S (matches a default event; a custom RSVP window would
+// be reset — surfaced in the note, not silent).
+//   social meetup edit --group <url-name> --event <numeric-id> [--title "…"
+//     --description "…" --start-time 18:00 --end-time 20:00 --venue-id 12345]
 async function harvestMeetupEdit(page, opts) {
   const group = typeof opts.group === "string" ? opts.group : "";
   let id = typeof opts.event === "string" ? opts.event : (typeof opts.id === "string" ? opts.id : "");
   if (!id && typeof opts.url === "string") { const m = opts.url.match(/\/events\/(\d+)/); if (m) id = m[1]; }
   if (!group || !/^\d+$/.test(String(id))) return { error: "pass --group <url-name> --event <numeric-id> and at least one field to change" };
-  await page.goto(`https://www.meetup.com/${group}/events/${id}/edit/`, { waitUntil: "domcontentloaded" });
-  await page.waitForTimeout(4000);
-  const titleInput = page.locator('[data-testid="event-name-input"]');
-  if (!(await titleInput.isVisible().catch(() => false))) return { error: `edit form for event ${id} not found — deleted, or not an event you manage?` };
 
-  const updated = [];
-  if (typeof opts.title === "string" && opts.title) { await titleInput.fill(opts.title); updated.push("title"); }
-  if (typeof opts.description === "string" && opts.description) {
-    const eds = page.locator("div.ProseMirror");
-    const n = await eds.count();
-    for (let i = 0; i < n; i++) {
-      const ed = eds.nth(i);
-      if (await ed.isVisible().catch(() => false)) {
-        await ed.click();
-        await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
-        await page.keyboard.press("Backspace");
-        await page.keyboard.insertText(opts.description);
-        updated.push("description");
-        break;
-      }
-    }
-  }
-  if (typeof opts.date === "string" && opts.date) { const r = await pickMeetupDate(page, opts.date); if (!r.ok) return { error: r.err }; updated.push("date"); }
-  const st = opts["start-time"] || opts.startTime;
-  if (st) { const t = page.locator('[aria-label="Edit start time"]').first(); if (await t.isVisible().catch(() => false)) { await t.fill(String(st)); await page.keyboard.press("Escape").catch(() => {}); updated.push("start-time"); } }
-  if (typeof opts.location === "string" && opts.location) {
-    const loc = page.locator('input[placeholder="Search or add location..."]').first();
-    if (await loc.isVisible().catch(() => false)) {
-      await loc.fill(opts.location); await page.waitForTimeout(1500);
-      const o = page.locator('[role="option"]').first();
-      if (await o.isVisible().catch(() => false)) await o.click();
-      updated.push("location");
-    }
-  }
-  if (!updated.length) return { error: "no fields changed — pass --title/--description/--date/--start-time/--location" };
+  const changed = ["title", "description", "start-time", "end-time", "date", "venue-id"]
+    .filter((k) => (typeof opts[k] === "string" && opts[k]) || (k === "start-time" && opts.startTime) || (k === "end-time" && opts.endTime));
+  if (!changed.length) return { error: "no fields changed — pass --title/--description/--start-time/--end-time/--date/--venue-id" };
 
-  const publish = opts.publish === true || opts.publish === "true";
-  const submit = page.getByRole("button", { name: publish ? "Publish" : "Save as draft" }).first();
-  await submit.waitFor({ timeout: 5000 });
-  await submit.click();
-  await page.waitForTimeout(4000);
-  if (/\/edit\/?($|\?)/.test(page.url())) return { error: `save blocked — still on the edit page (a required field may be empty).` };
-  return { records: [{ id, updated }], note: `Meetup event updated (${updated.join(", ")}): ${id}` };
+  const ev = await meetupReadEventForEdit(page, group, id);
+  if (!ev || !ev.id) return { error: `could not read event ${id} for edit — not found, not an event you manage, or the edit page didn't expose its Apollo state` };
+  if (ev.isSeries) return { error: `event ${id} is part of a SERIES — editing a series occurrence via full-replace is not yet supported (risk of applyToSeries side effects). Edit it in the UI.` };
+
+  // Current wall-clock start (strip the timezone offset → "YYYY-MM-DDTHH:MM").
+  const curStartLocal = String(ev.dateTime).replace(/([+-]\d{2}:\d{2}|Z)$/, "").slice(0, 16);
+  let [curDate, curTime] = curStartLocal.split("T");
+  let startDate = curDate, startTime = curTime;
+  if (typeof opts.date === "string" && opts.date) {
+    const d = parseLumaDay(String(opts.date));
+    if (!d) return { error: `could not parse --date "${opts.date}"` };
+    startDate = `${d.y}-${String(d.mo).padStart(2, "0")}-${String(d.d).padStart(2, "0")}`;
+  }
+  const stFlag = opts["start-time"] || opts.startTime;
+  if (stFlag) { if (!/^\d{1,2}:\d{2}$/.test(String(stFlag))) return { error: "--start-time must be HH:MM (24h)" }; startTime = String(stFlag); }
+  const startDateTime = `${startDate}T${startTime}`;
+
+  // Duration: preserve unless start or end changed; then recompute from wall-clock delta.
+  let duration = ev.duration && /^PT/.test(ev.duration) ? ev.duration : null;
+  const etFlag = opts["end-time"] || opts.endTime;
+  if (stFlag || etFlag || (typeof opts.date === "string" && opts.date)) {
+    const curEndLocal = String(ev.endTime).replace(/([+-]\d{2}:\d{2}|Z)$/, "").slice(0, 16);
+    let endTime = curEndLocal.split("T")[1] || startTime;
+    if (etFlag) { if (!/^\d{1,2}:\d{2}$/.test(String(etFlag))) return { error: "--end-time must be HH:MM (24h)" }; endTime = String(etFlag); }
+    const [sh, sm] = startTime.split(":").map(Number);
+    const [eh, em] = endTime.split(":").map(Number);
+    let mins = (eh * 60 + em) - (sh * 60 + sm); if (mins <= 0) mins += 24 * 60;
+    duration = `PT${Math.floor(mins / 60)}H${mins % 60}M0S`;
+  }
+  if (!duration) return { error: `event ${id} has no readable duration and no --start-time/--end-time to recompute it from` };
+
+  const input = {
+    applyToSeries: false,
+    description: typeof opts.description === "string" && opts.description ? opts.description : ev.description,
+    duration,
+    eventHosts: ev.eventHosts.map((h) => Number(h)).filter((n) => Number.isFinite(n)),
+    eventId: String(id),
+    featuredPhotoId: ev.featuredPhotoId,
+    feeOption: { enabled: ev.feeEnabled },
+    fundraising: { enabled: ev.fundraisingEnabled },
+    howToFindUs: ev.howToFindUs,
+    proNetworkEvents: { timezone: ev.timezone || "Australia/Melbourne" },
+    publishStatus: ev.status === "DRAFT" ? "DRAFT" : "PUBLISHED",
+    question: ev.question,
+    rsvpSettings: { guestLimit: ev.guestLimit, rsvpOpenDuration: "PT0S", rsvpCloseDuration: "PT0S", rsvpLimit: ev.maxTickets },
+    rsvpSurvey: { enabled: ev.rsvpSurveyEnabled },
+    startDateTime,
+    title: typeof opts.title === "string" && opts.title ? opts.title : ev.title,
+    topics: ev.topics,
+    komootUrl: ev.komootUrl,
+  };
+  if (typeof opts["venue-id"] === "string" && opts["venue-id"]) input.venueId = String(opts["venue-id"]);
+  else if (ev.venueId) input.venueId = String(ev.venueId);
+
+  const data = await meetupGql(page, "editEvent", MEETUP_GQL.edit, { input });
+  const res = data.editEvent;
+  if (res?.errors?.length) return { error: `editEvent rejected: ${res.errors.map((e) => e.message || JSON.stringify(e)).join("; ")}` };
+  if (!res?.event?.id) return { error: `editEvent returned no event: ${JSON.stringify(data).slice(0, 200)}` };
+
+  // Read back the public page (retry for CDN lag) and diff title + start.
+  let rb = null;
+  for (let i = 0; i < 5; i++) {
+    rb = await meetupPublicEvent(res.event.eventUrl || `https://www.meetup.com/${group}/events/${id}/`);
+    if (!rb.error) break;
+    await page.waitForTimeout(2000);
+  }
+  const rec = { id: String(id), updated: changed, url: res.event.eventUrl, title: input.title, startDateTime };
+  let verified = false;
+  if (rb && !rb.error) {
+    const mismatch = [];
+    if (rb.name !== input.title) mismatch.push(`title "${rb.name}" ≠ "${input.title}"`);
+    if (rb.startLocal && rb.startLocal.slice(0, 16) !== startDateTime) mismatch.push(`start ${rb.startLocal} ≠ ${startDateTime}`);
+    if (mismatch.length) return { error: `event ${id} edited but readback mismatched: ${mismatch.join("; ")} — inspect ${res.event.eventUrl}`, records: [rec] };
+    verified = true;
+  }
+  // Drafts aren't public, so JSON-LD readback can't run — the editEvent errors array
+  // is still the gate, but don't overclaim "verified" when the public diff was skipped.
+  const note = `Meetup event edited (${verified ? "verified: " : "readback skipped (draft?): "}${changed.join(", ")}): ${id}` +
+    (input.rsvpSettings.rsvpLimit === 0 && ev.maxTickets === 0 ? "" : " [note: RSVP open/close windows default to none — re-check if this event had a custom RSVP window]");
+  return { records: [rec], note };
 }
 
 // ── Meetup: delete an event ──────────────────────────────────────────────────
@@ -1139,7 +1239,7 @@ events (create/manage across luma + meetup — folded in from events-mcp):
   luma delete --event evt-…
   meetup list --group X [--past]              list a group's upcoming (or past) events
   meetup create --group X --title X --date 2026-07-19 --description "…" [--start-time --end-time --venue-id --publish]
-  meetup edit --group X --event <id> [--title --description --date --start-time --location --publish]
+  meetup edit --group X --event <id> [--title --description --date --start-time --end-time --venue-id]  (read-modify-write; preserves untouched fields)
   meetup delete --group X --event <id>
   meetup messages [--limit N]                your DM inbox (read-only)
   meetup messages --convo <id>               read one conversation thread
