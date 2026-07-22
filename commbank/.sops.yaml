@@ -1,0 +1,9 @@
+# SOPS configuration for commbank NetBank credentials.
+#
+# Single recipient today (Nick). Mirrors ~/git/orgs/enspyrco/tools/xero/.sops.yaml.
+# Higher stakes than the Xero client_secret: this is an actual NetBank login,
+# not a revocable OAuth credential. Never commit a populated secrets.yaml.
+
+creation_rules:
+  - path_regex: ^secrets\.yaml$
+    age: age1mkelwyppmll44ehjnarunmtamcxpee7jljyl475mlvxma7dm4f3q6lnmks

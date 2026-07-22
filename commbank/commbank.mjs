@@ -24,13 +24,26 @@ import { chromium } from "playwright";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { stdin } from "node:process";
+import { existsSync } from "node:fs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TOKEN = join(homedir(), ".claude", "cli-tools", ".tokens", "playwright", "commbank.json");
 const PLAYWRIGHT_CLI = join(HERE, "..", "playwright", "playwright.mjs");
+const SECRETS_PATH = join(HERE, "secrets.yaml");
 const HOME = "https://www.my.commbank.com.au/netbank/Portfolio/Home/Home.aspx";
+const LOGIN_URL = "https://www.my.commbank.com.au/netbank/Logon/Logon.aspx";
+
+// Decrypt secrets.yaml via sops (mirrors ~/git/orgs/enspyrco/tools/xero/xero.py's
+// load_secrets pattern). Returns null if no secrets file exists yet — auth falls
+// back to the fully-manual flow in that case. Uses sops's own --output-type json
+// so we don't need a YAML parser dependency.
+function loadSecrets() {
+  if (!existsSync(SECRETS_PATH)) return null;
+  const out = execFileSync("sops", ["--decrypt", "--output-type", "json", SECRETS_PATH], { encoding: "utf8" });
+  return JSON.parse(out);
+}
 const TODAY = () => {
   // dd/mm/yyyy without Date.now restrictions — read from system via Intl on a fixed call is fine here (CLI, not workflow)
   const d = new Date();
@@ -123,6 +136,38 @@ async function setRange(page, from, to) {
   await page.waitForTimeout(2500);
 }
 
+// NetBank's transaction list renders incrementally (infinite scroll and/or a
+// "load more" button) rather than all at once — a wide date range only
+// returns what's currently in the DOM unless we keep asking for more. Try a
+// "load more"-style button first (if NetBank has one), then fall back to
+// scrolling and watching the transaction-item count for a few rounds of no
+// growth. maxRounds is a safety valve against an infinite loop if the page
+// never stabilises for some reason.
+async function loadAllTransactions(page, maxRounds = 200) {
+  let stableRounds = 0;
+  let lastCount = -1;
+  for (let i = 0; i < maxRounds; i++) {
+    const count = await page.evaluate(() => document.querySelectorAll("[class~='transaction-item']").length);
+    if (count === lastCount) {
+      stableRounds++;
+      if (stableRounds >= 3) break; // 3 consecutive no-growth rounds = done
+    } else {
+      stableRounds = 0;
+    }
+    lastCount = count;
+
+    const loadMore = page.getByRole("button", { name: /load more|show more|view more/i }).first();
+    if (await loadMore.count()) {
+      await loadMore.click({ timeout: 5000 }).catch(() => {});
+    } else {
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    }
+    await page.waitForTimeout(1200);
+    await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
+  }
+  return lastCount;
+}
+
 async function scrapeTransactions(page, includeRaw) {
   return page.evaluate((raw) => {
     const parseAmt = (s) => {
@@ -154,10 +199,71 @@ async function scrapeTransactions(page, includeRaw) {
 
 // ---------- subcommands ----------
 async function cmdAuth() {
-  // Reuse the tested interactive-login flow from the playwright CLI.
-  console.error("Opening NetBank login. Log in (client number + password + NetCode), then press Enter in this terminal to save the session.");
-  const child = spawn("node", [PLAYWRIGHT_CLI, "auth", "--site", "https://www.commbank.com.au/", "--name", "commbank"], { stdio: "inherit" });
-  await new Promise((res) => child.on("exit", res));
+  const secrets = loadSecrets();
+
+  if (!secrets) {
+    // No stored credentials — fully manual flow via the shared playwright CLI.
+    console.error("Opening NetBank login. Log in (client number + password + NetCode), then press Enter in this terminal to save the session.");
+    console.error(`(Tip: run ${join(HERE, "set-credentials.sh")} once to store your client number + password encrypted, so future auths only need the NetCode step.)`);
+    const child = spawn("node", [PLAYWRIGHT_CLI, "auth", "--site", "https://www.commbank.com.au/", "--name", "commbank"], { stdio: "inherit" });
+    await new Promise((res) => child.on("exit", res));
+    return;
+  }
+
+  // Credentials stored — auto-fill client number + password, hand off to the
+  // human for NetCode 2FA only (that step is tied to your phone and shouldn't
+  // be automated even if it could be).
+  const browser = await chromium.launch({ headless: false });
+  try {
+    const ctx = await browser.newContext();
+    const page = await ctx.newPage();
+    await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
+    await page.waitForTimeout(1200);
+
+    // Don't trust getByLabel here — a prior attempt found it resolving BOTH
+    // "client number" and "password" label matches to the same input (label
+    // association on this page is apparently ambiguous/broken). Use input
+    // TYPE instead, which is unambiguous for a password field, and treat the
+    // first visible non-password text input as the client number field. Also
+    // handle NetBank possibly being a two-step form (client number → Next →
+    // password appears) rather than assuming both are present at once.
+    const passwordSelector = 'input[type="password"]:visible';
+    const textInputSelector = 'input:not([type="password"]):not([type="hidden"]):not([type="checkbox"]):not([type="submit"]):not([type="button"]):visible';
+
+    const clientNumberField = page.locator(textInputSelector).first();
+    await clientNumberField.fill(secrets.client_number, { timeout: 15000 });
+
+    let passwordField = page.locator(passwordSelector).first();
+    if ((await passwordField.count()) === 0) {
+      // Two-step form: advance past the client-number screen first.
+      await page.getByRole("button", { name: /^(next|continue|log ?on|log ?in)$/i }).first().click({ timeout: 10000 });
+      await page.waitForTimeout(1200);
+      passwordField = page.locator(passwordSelector).first();
+    }
+    await passwordField.waitFor({ state: "visible", timeout: 15000 });
+    await passwordField.fill(secrets.password, { timeout: 15000 });
+
+    await page.getByRole("button", { name: /log ?on|log ?in/i }).first().click({ timeout: 10000 }).catch(() => {
+      console.error("Couldn't find/click the login button automatically — click it yourself.");
+    });
+
+    console.error("Client number + password submitted. Complete the NetCode step yourself, then close the browser window (red X) to save the session.");
+
+    await new Promise((resolve) => {
+      page.once("close", resolve);
+      browser.once("disconnected", resolve);
+    });
+
+    try {
+      await ctx.storageState({ path: TOKEN });
+      console.log(JSON.stringify({ saved: TOKEN }, null, 2));
+    } catch (e) {
+      console.error(`Failed to save session: ${e.message}. Close the browser with the red-X next time instead of killing the process.`);
+      process.exitCode = 4;
+    }
+  } finally {
+    try { await browser.close(); } catch {}
+  }
 }
 
 async function cmdAccounts(args) {
@@ -175,6 +281,7 @@ async function cmdTransactions(args) {
     await gotoHome(page);
     await openAccount(page, args.account);
     if (from) await setRange(page, from, to);
+    if (!args["no-scroll"]) await loadAllTransactions(page); // scrolls to load full history by default
     return scrapeTransactions(page, args.raw);
   });
   console.log(JSON.stringify({ account: args.account, from: from || "default", to: to || "default", count: data.length, transactions: data }, null, 2));
@@ -195,6 +302,7 @@ async function cmdSearch(args) {
       await gotoHome(page);
       await openAccount(page, name);
       await setRange(page, from, to);
+      if (!args["no-scroll"]) await loadAllTransactions(page);
       const txns = await scrapeTransactions(page, true);
       const matches = txns.filter(t => {
         const hay = `${t.description} ${t.amount.toFixed(2)} ${t.raw || ""}`;

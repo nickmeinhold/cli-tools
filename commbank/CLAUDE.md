@@ -15,11 +15,25 @@ cookie jar can't keep you logged in indefinitely the way Gmail's refresh token d
 the session expires. When it expires, commands print `Run: commbank auth` and exit 3.
 
 ## Auth
-`commbank auth` shells out to the shared `playwright` CLI's interactive login (headed Chromium,
-you type client number + password + NetCode 2FA, press Enter to save). The session lands at
-`~/git/tools/cli-tools/.tokens/playwright/commbank.json` — same token store as the other
-playwright-backed tools. `node_modules` is a symlink to `../playwright/node_modules` (no second
-Playwright/browser install).
+Two modes, both interactive:
+- **No stored credentials (default):** `commbank auth` shells out to the shared `playwright`
+  CLI's interactive login (headed Chromium, you type client number + password + NetCode 2FA,
+  press Enter to save).
+- **With stored credentials:** run `./set-credentials.sh` once — prompts for client number +
+  password directly in your terminal (never pasted into a chat) and sops-encrypts them into
+  `secrets.yaml` (age recipient in `.sops.yaml`, same scheme as the Xero tool's `client_secret`,
+  but higher-stakes since this is an actual bank login, not a revocable OAuth credential). After
+  that, `commbank auth` auto-fills client number + password and only leaves the NetCode 2FA step
+  for you (2FA is tied to your phone and isn't automated even though it technically could be
+  scripted around).
+
+Either way the session lands at `~/git/tools/cli-tools/.tokens/playwright/commbank.json` — same
+token store as the other playwright-backed tools. `node_modules` is a symlink to
+`../playwright/node_modules` (no second Playwright/browser install).
+
+Fixed 2026-07-22: the `~/.local/bin/commbank` launcher had drifted to point at
+`~/.claude/cli-tools/commbank/commbank.mjs` (never existed there) instead of this repo — if
+`commbank` ever throws `MODULE_NOT_FOUND` again, check that wrapper first.
 
 ## Subcommands
 ```
