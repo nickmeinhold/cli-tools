@@ -1,0 +1,7 @@
+{
+  "name": "imessage-cli-wrapper",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "bin": { "imessage": "./imessage.mjs" }
+}
