@@ -25,6 +25,7 @@
  *   read --to <name> [--limit N] [--json]       Recent messages in a thread (name substring).
  *   send --to <name> (--text "..." | --file P)  Send a DM (opens the matching thread).
  *              [--dry-run]                       Open the thread, type nothing, report — never sends.
+ *   post --url <url> [--json]                    Read a public post (text, links, images).
  */
 
 import { createRequire } from "node:module";
@@ -288,6 +289,143 @@ async function cmdSend(args) {
   process.exit(ok ? 0 : 1);
 }
 
+// ---------- post reader ----------
+// Follow a lnkd.in / linkedin redirect shortlink to its real destination. LinkedIn wraps every
+// external URL in a shortener; the anchor href is the shortlink, so the useful thing (the actual
+// resource) is one redirect away. HEAD is enough — we only want the Location chain's endpoint.
+async function resolveShortlink(url) {
+  try {
+    const r = await fetch(url, { method: "HEAD", redirect: "follow" });
+    return r.url && r.url !== url ? r.url : url;
+  } catch {
+    return url; // network hiccup — hand back the shortlink rather than dropping it.
+  }
+}
+
+async function cmdPost(args) {
+  if (!args.url || args.url === true) die("Usage: linkedin post --url <url> [--json]", 2);
+  if (!(await exists(STORAGE))) die("No session. Run: linkedin auth");
+  // Vanity handle from a /posts/<handle>_slug URL — a zero-cost author fallback if the DOM/meta
+  // author anchors miss. (A /feed/update/urn:li:activity:<id>/ share URL has no handle, so null.)
+  const vanity = (args.url.match(/\/posts\/([a-z0-9-]+?)_/i) || [])[1] || null;
+
+  const { browser, page } = await launch();
+  await page.goto(args.url, { waitUntil: "domcontentloaded" });
+  await dismiss(page);
+
+  // The post body hydrates client-side. Poll until the COMMENTARY actually carries text — not just
+  // until a container exists (an early container with no text is the cheap-proxy trap that made the
+  // first cut scrape the viewer's profile chrome). Stable anchors: data-testid / componentkey
+  // survive LinkedIn's per-deploy classname hashing where semantic class selectors rot.
+  const CONTENT_SEL = '[data-testid="expandable-text-box"], [componentkey^="feed-commentary"], .update-components-text';
+  let ok = false;
+  for (let i = 0; i < 30; i++) {
+    ok = await page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      return !!el && (el.innerText || "").trim().length > 20;
+    }, CONTENT_SEL);
+    if (ok) break;
+    await page.waitForTimeout(600);
+  }
+
+  // Expand the "…more" toggle so we scrape the FULL body, not LinkedIn's truncated preview.
+  for (const sel of [
+    'button[aria-label*="see more" i]',
+    'button[data-testid*="expand" i]',
+    "button.feed-shared-inline-show-more-text__see-more-less-toggle",
+    "button.inline-show-more-text__button",
+  ]) {
+    try {
+      const b = page.locator(sel).first();
+      if (await b.count() && (await b.isVisible())) { await b.click({ timeout: 3000 }); await page.waitForTimeout(400); }
+    } catch {}
+  }
+
+  const scraped = await page.evaluate((ctx) => {
+    const { contentSel, vanity } = ctx;
+    const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+    const meta = (p) => document.querySelector(`meta[property="${p}"], meta[name="${p}"]`)?.content || "";
+    const out = { authWall: false, author: "", authorHeadline: "", text: "", metaDescription: "", links: [], images: [] };
+    if (/authwall|\/login|\/signup/i.test(location.href) ||
+        document.querySelector("form.join-form, section.authwall, .authwall-join-form")) {
+      out.authWall = true; return out;
+    }
+    out.metaDescription = clean(meta("og:description"));
+
+    // Author: og:title (guest render) → feed-actor component title → URL vanity handle.
+    out.author = clean(meta("og:title")).replace(/\s+on LinkedIn.*$/i, "");
+    if (!out.author) {
+      const actor = document.querySelector('[componentkey^="feed-actor"], [data-testid*="actor" i]');
+      out.author = clean(actor?.innerText?.split("\n")[0]);
+    }
+    if (!out.author && vanity) out.author = vanity;
+
+    // Post body: stable content anchor (data-testid / componentkey) scopes to the commentary ALONE,
+    // no profile-sidebar chrome. Only if both are gone (a total redesign) fall back to the densest
+    // leaf text block, then the whole main/body.
+    const anchor = document.querySelector(contentSel);
+    if (anchor && (anchor.innerText || "").trim().length > 20) {
+      out.text = anchor.innerText.trim().slice(0, 12000);
+    } else {
+      let best = "";
+      for (const el of document.querySelectorAll("main div, article div, section div")) {
+        if (el.children.length > 3) continue; // want leaf-ish text blocks, not layout wrappers
+        const t = (el.innerText || "").trim();
+        if (t.length > best.length && t.length < 8000) best = t;
+      }
+      out.text = best || (document.querySelector("main") || document.body).innerText.trim().slice(0, 12000);
+    }
+
+    const seen = new Set();
+    document.querySelectorAll("a[href]").forEach((a) => {
+      const href = a.href;
+      // Keep OUTBOUND links (lnkd.in shortlinks + any non-linkedin URL); drop in-app chrome nav.
+      const outbound = /lnkd\.in/.test(href) || !/^https?:\/\/([a-z]+\.)?linkedin\.com/i.test(href);
+      if (href && outbound && !seen.has(href)) { seen.add(href); out.links.push({ text: clean(a.innerText).slice(0, 120), href }); }
+    });
+    // Post images carry the "feedshare" signature in the CDN path (vs profile-displayphoto avatars).
+    // Pick the LARGEST variant from srcset — each size is HMAC-signed (the `t=` token covers the
+    // path), so we must NOT rewrite the size token by hand (that invalidates the signature → 403).
+    // Instead read the signed high-res URL LinkedIn already emitted in srcset.
+    document.querySelectorAll('img[src*="feedshare"], img[srcset*="feedshare"]').forEach((img) => {
+      let best = img.src, bestW = 0;
+      (img.srcset || "").split(",").forEach((part) => {
+        const [url, w] = part.trim().split(/\s+/);
+        const width = parseInt(w) || 0;
+        if (url && width >= bestW) { best = url; bestW = width; }
+      });
+      if (best && /feedshare/.test(best) && !out.images.includes(best)) out.images.push(best);
+    });
+    // og:image is the durable fallback if the DOM img wasn't caught.
+    const ogImg = meta("og:image");
+    if (ogImg && !out.images.some((i) => i.split("?")[0] === ogImg.split("?")[0])) out.images.push(ogImg);
+    return out;
+  }, { contentSel: CONTENT_SEL, vanity });
+
+  await browser.close();
+
+  if (!ok && !scraped.authWall && !scraped.text) die("Post content didn't render (private post, bad URL, or stale session). Try: linkedin whoami", 3);
+  if (scraped.authWall) die("Hit LinkedIn's auth wall — the session is stale. Run: linkedin auth", 3);
+
+  // Resolve lnkd.in shortlinks to their real destinations (the actual resources).
+  for (const l of scraped.links) {
+    if (/lnkd\.in/.test(l.href)) l.resolved = await resolveShortlink(l.href);
+  }
+
+  if (args.json) { console.log(JSON.stringify({ url: args.url, ...scraped }, null, 2)); process.exit(0); }
+  console.log(`Author: ${scraped.author || "(unknown)"}\n`);
+  console.log(scraped.text || scraped.metaDescription || "(no text extracted)");
+  if (scraped.links.length) {
+    console.log(`\nLinks (${scraped.links.length}):`);
+    for (const l of scraped.links) console.log(`  • ${l.resolved || l.href}${l.text ? `  [${l.text}]` : ""}`);
+  }
+  if (scraped.images.length) {
+    console.log(`\nImages (${scraped.images.length}):`);
+    for (const im of scraped.images) console.log(`  • ${im}`);
+  }
+  process.exit(0);
+}
+
 function help() {
   console.log(`linkedin — LinkedIn DM CLI (Nick's account, via Playwright + linkedin.com web)
 
@@ -299,6 +437,7 @@ Usage: linkedin <subcommand> [options]
   read --to <name> [--limit N] [--json]       Recent messages in a thread (name substring).
   send --to <name> (--text "..." | --file P)  Send a DM (opens the matching thread).
              [--dry-run]                       Open the thread but DON'T send; report what it would.
+  post --url <url> [--json]                   Read a public post: text, links (lnkd.in resolved), images.
 
 WHY BROWSER-BACKED (not a protocol/API client):
   LinkedIn has no supported messaging API, and its internal Voyager REST endpoint now 500s
@@ -317,6 +456,7 @@ async function main() {
     case "list": return cmdList(args);
     case "read": return cmdRead(args);
     case "send": return cmdSend(args);
+    case "post": return cmdPost(args);
     default: console.error(`Unknown subcommand: ${sub}`); help(); process.exit(2);
   }
 }
