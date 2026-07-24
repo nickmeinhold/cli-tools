@@ -87,6 +87,9 @@ Subcommands:
   send   --group <id|name> --text "..." Send to a group (base64 group id or a name substring).
   send   ... --attach <file>[,<file>...]  Attach one or more files (comma-separated).
                                           --text becomes optional when --attach is given.
+  send   --group ... --mention "@Name[,@Name2]"  Real @mentions in a GROUP message.
+                                          Put the @tokens literally in --text; each resolves
+                                          to a member (DB name/e164/ACI) and pings them. Group-only.
   send   ... [--reply-to <sent_at> --reply-author <e164>]  Quote-reply (handles from 'read --json').
   send   ... --edit-to <sent_at> --text "..."  Edit a message already sent, in place
                                         (--text is the FULL replacement body; shows an
@@ -361,20 +364,43 @@ function resolveGroup(g) {
   return matches[0].id;
 }
 
+// --mention "@Name[,@Name2,...]" — turn each @token in --text into a signal-cli
+// mention spec "start:length:recipient". Ranges are UTF-16 code units, which JS
+// string indices/lengths already are. The @token must appear literally in --text;
+// its WHOLE span (including the @) is covered so Signal renders one @DisplayName
+// pill (covering only "Name" would double the @). A raw "start:length:recipient"
+// value passes through unchanged. Group-only (Signal has no 1:1 mentions).
+function buildMentionSpecs(raw, text) {
+  const specs = [];
+  for (const item of String(raw).split(",").map((s) => s.trim()).filter(Boolean)) {
+    if (/^\d+:\d+:.+$/.test(item)) { specs.push(item); continue; } // raw passthrough
+    const token = item.startsWith("@") ? item : "@" + item;
+    const name = item.replace(/^@/, "");
+    const start = text.indexOf(token);
+    if (start < 0)
+      throw new Error(`--mention ${item}: token "${token}" not found in --text (the @token must appear literally in the message)`);
+    if (text.indexOf(token, start + 1) >= 0)
+      console.error(`[mention] "${token}" appears more than once in --text; mentioning the first occurrence.`);
+    specs.push(`${start}:${token.length}:${resolveRecipient(name)}`);
+  }
+  if (!specs.length) throw new Error("--mention was given but no usable tokens were parsed");
+  return specs;
+}
+
 function cmdSend(args) {
   // Fail CLOSED on unrecognized flags: a send is irreversible, so an unknown
   // flag (e.g. a typo'd safety flag like --dryrun, or --no-send) must NEVER
   // fall through and send anyway. Reject before doing anything. This is the
   // guard that turns a silent mis-send into a loud refusal.
   const KNOWN_SEND_FLAGS = new Set([
-    "text", "to", "group", "attach", "reply-to", "reply-author", "reply-text", "edit-to", "dry-run",
+    "text", "to", "group", "attach", "mention", "reply-to", "reply-author", "reply-text", "edit-to", "dry-run",
   ]);
   const unknown = Object.keys(args).filter((k) => k !== "_" && !KNOWN_SEND_FLAGS.has(k));
   if (unknown.length) {
     throw new Error(
       `unknown send flag(s): ${unknown.map((u) => "--" + u).join(", ")}. ` +
       `Refusing to send (a stray flag must not silently fire a real message). ` +
-      `Known: --text --to --group --attach --reply-to --reply-author --reply-text --edit-to --dry-run`);
+      `Known: --text --to --group --attach --mention --reply-to --reply-author --reply-text --edit-to --dry-run`);
   }
   ensureSignalCli();
   // --attach FILE[,FILE...] — outbound file attachments (comma-separated for
@@ -390,6 +416,14 @@ function cmdSend(args) {
     throw new Error("send requires --text \"...\" or --attach <file>");
   if (!args.to && !args.group) throw new Error("send requires --to <num|name> or --group <id|name>");
   if (args.to && args.group) throw new Error("send takes either --to or --group, not both");
+  // --mention "@Name,@Name2": group-only, needs --text carrying the @tokens.
+  if (args.mention !== undefined) {
+    if (args.mention === true) throw new Error('--mention needs a value, e.g. --mention "@Andy,@Wade"');
+    if (!args.group) throw new Error("--mention only works with --group (Signal has no 1:1 mentions)");
+    if (!args.text) throw new Error("--mention requires --text containing the @tokens to mention");
+  }
+  const mentionSpecs = args.mention !== undefined ? buildMentionSpecs(args.mention, String(args.text)) : [];
+  const mentionArg = mentionSpecs.length ? ["--mention", ...mentionSpecs] : [];
   // --edit-to <sent_at>: replace a message already sent, in place. Maps to
   // signal-cli's --edit-timestamp. Signal edits swap the WHOLE body, so --text
   // is the full replacement (not a diff); the recipient sees one message with an
@@ -413,6 +447,7 @@ function cmdSend(args) {
     console.error(`[dry-run] would send to ${dest}${editNote} — NOT sent.`);
     if (args.text) console.error(`[dry-run] text: ${args.text}`);
     if (attachments.length) console.error(`[dry-run] attachments: ${attachments.join(", ")}`);
+    if (mentionSpecs.length) console.error(`[dry-run] mentions: ${mentionSpecs.join(" ")}`);
     return;
   }
   // signal-cli quotes by TIMESTAMP + AUTHOR (it has no message-id concept).
@@ -428,7 +463,7 @@ function cmdSend(args) {
   const msgArg = args.text ? ["-m", args.text] : [];
   const attachArg = attachments.length ? ["-a", ...attachments] : [];
   const editArg = isEdit ? ["--edit-timestamp", String(args["edit-to"])] : [];
-  const r = spawnSync("signal-cli", ["send", ...msgArg, ...attachArg, ...quote, ...editArg, ...target], { encoding: "utf8" });
+  const r = spawnSync("signal-cli", ["send", ...msgArg, ...attachArg, ...mentionArg, ...quote, ...editArg, ...target], { encoding: "utf8" });
   if (r.status !== 0) throw new Error(`signal-cli send failed: ${r.stderr || r.stdout}`);
   const note = attachments.length ? ` with ${attachments.length} attachment(s)` : "";
   const editNote = isEdit ? ` (edited message ${args["edit-to"]})` : "";
