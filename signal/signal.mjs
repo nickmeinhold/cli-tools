@@ -25,6 +25,7 @@
  *   link    [--name LABEL]    One-time: render QR, scan from phone to pair signal-cli.
  *   send    --to <num|name> --text "..."   Send a 1:1 message via signal-cli.
  *   send    --group <id|name> --text "..." Send to a group via signal-cli.
+ *   send    --group ... --mention "@Name[,@Name2]"  Real @mentions in a group message.
  *   receive                  Pull pending inbound messages via signal-cli (prints JSON lines).
  *   key                      (debug) Print the derived SQLCipher key.
  *
@@ -83,6 +84,9 @@ Subcommands:
                              (Signal → Settings → Linked Devices → Link New Device).
   send   --to <num|name> --text "..."   Send 1:1 via signal-cli (E.164 or a DB name substring).
   send   --group <id|name> --text "..." Send to a group (base64 group id or a name substring).
+  send   --group ... --mention "@Name[,@Name2]"  Real @mentions in a GROUP message: put the
+                                        @tokens literally in --text; each resolves to a member
+                                        and pings them. Group-only.
   receive                    Pull pending inbound messages (JSON lines).
   key                        (debug) Print the derived SQLCipher key.`);
 }
@@ -347,15 +351,45 @@ function resolveGroup(g) {
   return matches[0].id;
 }
 
+// --mention "@Name[,@Name2,...]" — turn each @token in --text into a signal-cli
+// mention spec "start:length:recipient". Ranges are UTF-16 code units, which JS
+// string indices/lengths already are. The @token must appear literally in --text;
+// its WHOLE span (including the @) is covered so Signal renders one @DisplayName
+// pill (covering only "Name" would double the @). A raw "start:length:recipient"
+// value passes through unchanged. Group-only (Signal has no 1:1 mentions).
+function buildMentionSpecs(raw, text) {
+  const specs = [];
+  for (const item of String(raw).split(",").map((s) => s.trim()).filter(Boolean)) {
+    if (/^\d+:\d+:.+$/.test(item)) { specs.push(item); continue; } // raw passthrough
+    const token = item.startsWith("@") ? item : "@" + item;
+    const name = item.replace(/^@/, "");
+    const start = text.indexOf(token);
+    if (start < 0)
+      throw new Error(`--mention ${item}: token "${token}" not found in --text (the @token must appear literally in the message)`);
+    if (text.indexOf(token, start + 1) >= 0)
+      console.error(`[mention] "${token}" appears more than once in --text; mentioning the first occurrence.`);
+    specs.push(`${start}:${token.length}:${resolveRecipient(name)}`);
+  }
+  if (!specs.length) throw new Error("--mention was given but no usable tokens were parsed");
+  return specs;
+}
+
 function cmdSend(args) {
   ensureSignalCli();
   if (!args.text) throw new Error("send requires --text \"...\"");
   if (!args.to && !args.group) throw new Error("send requires --to <num|name> or --group <id|name>");
   if (args.to && args.group) throw new Error("send takes either --to or --group, not both");
+  // --mention "@Name,@Name2": real @mentions in a group. Group-only; --text carries the @tokens.
+  if (args.mention !== undefined) {
+    if (args.mention === true) throw new Error('--mention needs a value, e.g. --mention "@Andy,@Wade"');
+    if (!args.group) throw new Error("--mention only works with --group (Signal has no 1:1 mentions)");
+  }
+  const mentionSpecs = args.mention !== undefined ? buildMentionSpecs(args.mention, String(args.text)) : [];
+  const mentionArg = mentionSpecs.length ? ["--mention", ...mentionSpecs] : [];
   const target = args.group
     ? ["-g", resolveGroup(args.group)]
     : [resolveRecipient(args.to)];
-  const r = spawnSync("signal-cli", ["send", "-m", args.text, ...target], { encoding: "utf8" });
+  const r = spawnSync("signal-cli", ["send", "-m", args.text, ...mentionArg, ...target], { encoding: "utf8" });
   if (r.status !== 0) throw new Error(`signal-cli send failed: ${r.stderr || r.stdout}`);
   console.error(`Sent to ${args.group ? `group ${target[1]}` : target[0]}.`);
   if (r.stdout.trim()) console.log(r.stdout.trim());
