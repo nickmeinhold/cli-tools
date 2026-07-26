@@ -883,7 +883,8 @@ async function harvestLumaGuests(page, opts) {
 // and events you're going to / invited to; `role` is mapped defensively when the
 // entry carries one.
 async function harvestLumaEvents(page, opts) {
-  const j = await lumaApi(page, `/home/get-events?pagination_limit=${Math.min(Math.max(opts.limit, 1), 50)}&period=future`);
+  const period = (opts.past === true || opts.past === "true") ? "past" : "future";
+  const j = await lumaApi(page, `/home/get-events?pagination_limit=${Math.min(Math.max(opts.limit, 1), 50)}&period=${period}`);
   const out = (j.entries || []).map((entry) => {
     const e = entry.event || {};
     return {
@@ -1232,7 +1233,7 @@ harvest (roster/attendees):
   linkedin connections   facebook friends   meetup members --group X   luma guests --event Y
   social auth <network>   social networks
 events (create/manage across luma + meetup — folded in from events-mcp):
-  luma list                                  list your upcoming Luma events
+  luma list [--past]                         list your upcoming (or --past) Luma events
   luma create --title X --start 2026-07-26 --start-time 18:00 [--end-time --location --description --timezone --location-json]
   luma edit --event evt-… [--title --description --start --start-time --end-time --location]
   luma change-photo --event evt-… (--search tech | --category Tech | --file /abs.jpg)
