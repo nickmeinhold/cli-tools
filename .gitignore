@@ -30,3 +30,15 @@ build/
 **/seen.json
 **/*.seen.json
 **/watch_state.json
+
+# personal watchers/automation — homed in cli-tools-private, run in place
+/signal/bendigo-watch.sh
+/signal/yoneda-watch.sh
+/signal/disappearing-archive.sh
+/linkedin/linkedin-watch.sh
+/linkedin/linkedin-watch.mjs
+/linkedin/linkedin-draft-loop.sh
+/linkedin/linkedin-draft-loop.mjs
+/linkedin/com.claude.linkedin-watch.plist
+/linkedin/com.claude.linkedin-draft-loop.plist
+/whatsapp/com.nick.wa-db-sync.plist
