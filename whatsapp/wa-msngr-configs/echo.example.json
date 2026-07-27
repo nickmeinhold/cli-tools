@@ -1,0 +1,9 @@
+{
+  "name": "example",
+  "jid": "1203630000000000000@g.us",
+  "groupName": "Your Group",
+  "groupDesc": "One-line description of the group",
+  "poll_ms": 15000,
+  "model": "sonnet",
+  "context": "Background the bot should answer from. Point WA_MSNGR_CONFIG_FILE at your own copy of this file (kept out of git)."
+}

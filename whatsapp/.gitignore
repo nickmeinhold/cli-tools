@@ -2,3 +2,5 @@ __pycache__/
 wa-msngr/*/bot.pid
 wa-msngr/*/cursor
 wa-msngr/*/bot.log
+wa-msngr-configs/*.json
+!wa-msngr-configs/*.example.json
