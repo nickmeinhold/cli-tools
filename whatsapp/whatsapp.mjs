@@ -32,8 +32,9 @@ import { mkdir, readFile, writeFile, rename, unlink, readdir, stat } from "node:
 import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { TOKENS_DIR } from "../lib/paths.mjs";
 
-const AUTH_DIR = join(homedir(), ".claude", "cli-tools", ".tokens", "whatsapp");
+const AUTH_DIR = join(TOKENS_DIR, "whatsapp");
 // Persistent cooldown gate. When WhatsApp starts terminating handshakes (428,
 // "Connection Terminated"), it's a server-side rate-limit — and every extra
 // reconnect attempt *extends* it. This lockfile makes re-hammering impossible
@@ -934,7 +935,7 @@ async function cmdFetchHistory(args) {
   // want to throw away the sync — re-pairing costs a QR scan. Future
   // fetch-history runs can hydrate from this cache instead of re-syncing.
   const fs = await import("node:fs/promises");
-  const cacheDir = join(homedir(), ".claude", "cli-tools", ".tokens", "whatsapp-cache");
+  const cacheDir = join(TOKENS_DIR, "whatsapp-cache");
   await fs.mkdir(cacheDir, { recursive: true });
   const cachePath = join(cacheDir, `sync-${Date.now()}.json`);
   const cacheBody = {

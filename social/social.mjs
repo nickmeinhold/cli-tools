@@ -26,8 +26,9 @@ import { chromium } from "playwright";
 import { writeFile } from "node:fs/promises";
 import { existsSync, readFileSync, appendFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { TOKENS_DIR } from "../lib/paths.mjs";
 
-const TOKENS = `${homedir()}/git/tools/cli-tools/.tokens/playwright`;
+const TOKENS = `${TOKENS_DIR}/playwright`;
 const storagePath = (label) => `${TOKENS}/${label}.json`;
 
 // ── Backend registry ─────────────────────────────────────────────────────────

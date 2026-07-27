@@ -27,9 +27,10 @@ import { fileURLToPath } from "node:url";
 import { spawn, execFileSync } from "node:child_process";
 import { stdin } from "node:process";
 import { existsSync } from "node:fs";
+import { TOKENS_DIR } from "../lib/paths.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const TOKEN = join(homedir(), ".claude", "cli-tools", ".tokens", "playwright", "commbank.json");
+const TOKEN = join(TOKENS_DIR, "playwright", "commbank.json");
 const PLAYWRIGHT_CLI = join(HERE, "..", "playwright", "playwright.mjs");
 const SECRETS_PATH = join(HERE, "secrets.yaml");
 const HOME = "https://www.my.commbank.com.au/netbank/Portfolio/Home/Home.aspx";

@@ -34,8 +34,9 @@ import { join } from "node:path";
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
 import { openStorage, dismissDialogs, sendMessage } from "../lib/browser-context.mjs";
+import { TOKENS_DIR } from "../lib/paths.mjs";
 
-const TOKEN_DIR = join(homedir(), ".claude", "cli-tools", ".tokens", "instagram");
+const TOKEN_DIR = join(TOKENS_DIR, "instagram");
 const STORAGE = join(TOKEN_DIR, "storageState.json");
 const BASE = "https://www.instagram.com";
 

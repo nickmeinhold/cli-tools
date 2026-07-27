@@ -2,7 +2,8 @@
 import { chromium } from "playwright";
 import { join } from "node:path";
 import { homedir } from "node:os";
-const storage = join(homedir(), ".claude", "cli-tools", ".tokens", "playwright", "asc.json");
+import { TOKENS_DIR } from "../lib/paths.mjs";
+const storage = join(TOKENS_DIR, "playwright", "asc.json");
 const browser = await chromium.launch({ headless: true });
 const ctx = await browser.newContext({ storageState: storage, viewport: { width: 1400, height: 950 } });
 const page = await ctx.newPage();

@@ -36,9 +36,10 @@ import { join } from "node:path";
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
 import { openStorage, dismissDialogs, sendMessage } from "../lib/browser-context.mjs";
+import { TOKENS_DIR } from "../lib/paths.mjs";
 
 const LABEL = "linkedin";
-const STORAGE = join(homedir(), ".claude", "cli-tools", ".tokens", "playwright", `${LABEL}.json`);
+const STORAGE = join(TOKENS_DIR, "playwright", `${LABEL}.json`);
 const BASE = "https://www.linkedin.com";
 
 // ---------- args ----------
@@ -175,7 +176,7 @@ async function sendInThread(page, text) {
 
 // ---------- commands ----------
 async function cmdAuth() {
-  await mkdir(join(homedir(), ".claude", "cli-tools", ".tokens", "playwright"), { recursive: true });
+  await mkdir(join(TOKENS_DIR, "playwright"), { recursive: true });
   const browser = await chromium.launch({ headless: false });
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 950 } });
   const page = await ctx.newPage();

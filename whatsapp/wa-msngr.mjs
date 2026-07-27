@@ -28,6 +28,7 @@ import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { TOKENS_DIR } from "../lib/paths.mjs";
 
 // --- Config: which group + knowledge base this instance serves ---------------
 // Configs live next to this script so the tool survives repo moves (the old
@@ -52,7 +53,7 @@ const GROUP_DESC = CFG.groupDesc || "";
 // sure" rather than invent anything beyond this.
 const PROJECT_CONTEXT = CFG.context || "";
 const NDJSON = join(homedir(), ".whatsapp.messages", "wa-events.ndjson");
-const STATE_DIR = join(homedir(), ".claude", "cli-tools", "whatsapp", "wa-msngr", CONFIG_NAME);
+const STATE_DIR = join(TOKENS_DIR, "wa-msngr", CONFIG_NAME);
 const CURSOR_FILE = join(STATE_DIR, "cursor");
 const PID_FILE = join(STATE_DIR, "bot.pid");
 const LOG_FILE = join(STATE_DIR, "bot.log");

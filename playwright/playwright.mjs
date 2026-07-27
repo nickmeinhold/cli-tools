@@ -22,9 +22,10 @@ import { mkdir, writeFile, readFile, access } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { stdin } from "node:process";
+import { TOKENS_DIR } from "../lib/paths.mjs";
 // (unused after readline removal — kept only as a placeholder if needed)
 
-const TOKEN_DIR = join(homedir(), ".claude", "cli-tools", ".tokens", "playwright");
+const TOKEN_DIR = join(TOKENS_DIR, "playwright");
 
 function storagePath(name) {
   return join(TOKEN_DIR, `${name}.json`);

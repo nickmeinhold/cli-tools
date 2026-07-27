@@ -1,6 +1,6 @@
 // Shared Google auth for the gmail/gcal CLIs.
 // OAuth loopback flow against a user-owned Desktop OAuth client (Testing mode).
-// Refresh tokens are persisted at ~/git/tools/cli-tools/.tokens/google.json.
+// Refresh tokens are persisted at ~/.claude/.cli-tokens/google.json.
 // In Testing mode Google expires refresh tokens after 7 days — re-run `gmail auth`.
 
 import { google } from "googleapis";
@@ -9,8 +9,9 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { exec } from "node:child_process";
+import { TOKENS_DIR } from "../lib/paths.mjs";
 
-const TOKEN_DIR = join(homedir(), "git/tools/cli-tools/.tokens");
+const TOKEN_DIR = TOKENS_DIR;
 const TOKEN_FILE = join(TOKEN_DIR, "google.json");
 
 const CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID;

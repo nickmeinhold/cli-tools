@@ -45,8 +45,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { createInterface } from "node:readline";
+import { TOKENS_DIR } from "../lib/paths.mjs";
 
-const TOKEN_DIR = join(homedir(), ".claude", "cli-tools", ".tokens", "telegram");
+const TOKEN_DIR = join(TOKENS_DIR, "telegram");
 const SESSION_PATH = join(TOKEN_DIR, "session.txt");
 
 // GramJS prints a version banner at client construction — *before* any

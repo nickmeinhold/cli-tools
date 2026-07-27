@@ -33,6 +33,7 @@ import { createRequire } from "node:module";
 import { mkdir, writeFile, readFile, access } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { TOKENS_DIR } from "../lib/paths.mjs";
 
 const require = createRequire(import.meta.url);
 const { login } = require("ws3-fca");
@@ -46,7 +47,7 @@ console.log = (...a) => {
   _stdoutLog(...a);
 };
 
-const TOKEN_DIR = join(homedir(), ".claude", "cli-tools", ".tokens", "messenger");
+const TOKEN_DIR = join(TOKENS_DIR, "messenger");
 const APPSTATE = join(TOKEN_DIR, "appstate.json");
 
 // ws3-fca login options. Quiet, present-but-not-noisy.
