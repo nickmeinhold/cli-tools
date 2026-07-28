@@ -21,6 +21,7 @@
  *   list                     List private conversations (name, e164, msg count, last active).
  *   list    --groups         List group conversations (name, member count, last active).
  *   read    --name|--id      Dump a conversation chronologically. [--limit N] [--json]
+ *                            [--since <ms>] only messages with sent_at > ms (incremental reads).
  *   read    --group <substr> Dump a GROUP; incoming lines show the resolved sender name.
  *   export                   Export private convos to NDJSON for the love_agent corpus.
  *                            [--name|--id to scope] [--out PATH]
@@ -83,6 +84,8 @@ Subcommands:
          --group <substr>    Dump a GROUP oldest→newest; incoming lines show the
                              resolved sender name (outgoing = ME). [--limit N] [--json]
          --id <conv-id>      Dump by conversation id (works for 1:1 or group).
+         --since <ms>        Only messages with sent_at > ms (millisecond epoch);
+                             incremental reads for watchers. Non-numeric = error.
   export                     Export private convos to NDJSON for the corpus.
                              [--name <substr> | --id <id>] [--out PATH]
   link   [--name LABEL]      One-time pairing: render QR, scan with phone
@@ -288,8 +291,22 @@ const SENDER_SUBQUERY = `(
     json_extract(s.json, '$.systemGivenName'), s.e164, m.sourceServiceId)
   FROM conversations s WHERE s.serviceId = m.sourceServiceId LIMIT 1)`;
 
-function fetchMessages(convId, limit) {
+function fetchMessages(convId, limit, since) {
   const lim = limit ? `LIMIT ${parseInt(limit, 10)}` : "";
+  // --since <ms>: incremental read — only messages NEWER than a caller-held
+  // high-water-mark (the watchers pass max(sent_at) of what they've already
+  // processed). Filter on m.sent_at specifically (not the COALESCE ordering key)
+  // so it matches the watchers' hwm exactly, avoiding an off-by-one against
+  // received_at. FAIL CLOSED on a bad value: a silently-ignored --since would
+  // re-feed a watcher's entire message history to its LLM every tick.
+  let sinceClause = "";
+  if (since !== undefined) {
+    if (!/^\d{10,}$/.test(String(since)))
+      throw new Error(
+        `--since expects a millisecond epoch timestamp (10+ digits); got "${since}". ` +
+        `Refusing to run — a silently-ignored --since would re-read the full history.`);
+    sinceClause = `AND m.sent_at > ${parseInt(since, 10)}`;
+  }
   // type: 'outgoing' = me (Nick), 'incoming' = them. `sender` resolves the
   // individual author for GROUP reads; it's ignored on 1:1 output (which uses
   // ME/THEM) but harmless to carry.
@@ -300,12 +317,13 @@ function fetchMessages(convId, limit) {
     WHERE m.conversationId = '${convId.replace(/'/g, "''")}'
       AND m.type IN ('incoming','outgoing')
       AND m.body IS NOT NULL AND length(m.body) > 0
+      ${sinceClause}
     ORDER BY COALESCE(m.sent_at, m.received_at) ASC ${lim}`);
 }
 
 function cmdRead(args) {
   const conv = resolveConversation(args);
-  const msgs = fetchMessages(conv.id, args.limit);
+  const msgs = fetchMessages(conv.id, args.limit, args.since);
   if (args.json) {
     console.log(JSON.stringify({ conversation: { id: conv.id, name: displayName(conv), e164: conv.e164 }, messages: msgs }, null, 2));
     return;
