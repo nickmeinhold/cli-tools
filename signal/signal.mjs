@@ -84,8 +84,9 @@ Subcommands:
          --group <substr>    Dump a GROUP oldest→newest; incoming lines show the
                              resolved sender name (outgoing = ME). [--limit N] [--json]
          --id <conv-id>      Dump by conversation id (works for 1:1 or group).
-         --since <ms>        Only messages with sent_at > ms (millisecond epoch);
-                             incremental reads for watchers. Non-numeric = error.
+         --since <ms>        Only messages with sent_at > ms (millisecond epoch,
+                             digits only; 0 = from the beginning). Incremental
+                             reads for watchers. Non-numeric = error (fail closed).
   export                     Export private convos to NDJSON for the corpus.
                              [--name <substr> | --id <id>] [--out PATH]
   link   [--name LABEL]      One-time pairing: render QR, scan with phone
@@ -301,9 +302,13 @@ function fetchMessages(convId, limit, since) {
   // re-feed a watcher's entire message history to its LLM every tick.
   let sinceClause = "";
   if (since !== undefined) {
-    if (!/^\d{10,}$/.test(String(since)))
+    // Digits only. Reject non-numeric (fail closed — the real hazard is a
+    // silently-ignored --since re-reading the full history). Allow 0/small
+    // values: a watcher's first run seeds hwm=0, and `--since 0` must literally
+    // mean "everything after 0" (never mis-parsed, always applied as written).
+    if (!/^\d+$/.test(String(since)))
       throw new Error(
-        `--since expects a millisecond epoch timestamp (10+ digits); got "${since}". ` +
+        `--since expects a millisecond epoch timestamp (digits only); got "${since}". ` +
         `Refusing to run — a silently-ignored --since would re-read the full history.`);
     sinceClause = `AND m.sent_at > ${parseInt(since, 10)}`;
   }
