@@ -19,7 +19,9 @@
  *
  * Subcommands:
  *   list                     List private conversations (name, e164, msg count, last active).
+ *   list    --groups         List group conversations (name, member count, last active).
  *   read    --name|--id      Dump a conversation chronologically. [--limit N] [--json]
+ *   read    --group <substr> Dump a GROUP; incoming lines show the resolved sender name.
  *   export                   Export private convos to NDJSON for the love_agent corpus.
  *                            [--name|--id to scope] [--out PATH]
  *   link    [--name LABEL]    One-time: render QR, scan from phone to pair signal-cli.
@@ -76,8 +78,11 @@ Write path: signal-cli linked device (run \`signal link\` once)
 
 Subcommands:
   list                       List private conversations (name, e164, count, last active).
-  read   --name <substr>     Dump a conversation oldest→newest. [--limit N] [--json]
-         --id <conv-id>
+  list   --groups            List group conversations (name, member count, count, last active).
+  read   --name <substr>     Dump a 1:1 conversation oldest→newest. [--limit N] [--json]
+         --group <substr>    Dump a GROUP oldest→newest; incoming lines show the
+                             resolved sender name (outgoing = ME). [--limit N] [--json]
+         --id <conv-id>      Dump by conversation id (works for 1:1 or group).
   export                     Export private convos to NDJSON for the corpus.
                              [--name <substr> | --id <id>] [--out PATH]
   link   [--name LABEL]      One-time pairing: render QR, scan with phone
@@ -166,7 +171,40 @@ function cmdKey() {
   console.log(deriveKey());
 }
 
+// Count space-separated ACIs in a group's `members` text column.
+function memberCount(members) {
+  return members && members.trim() ? members.trim().split(/\s+/).length : 0;
+}
+
+function cmdListGroups(args = {}) {
+  const rows = query(`
+    SELECT c.id, c.name, c.members, c.active_at,
+           (SELECT count(*) FROM messages m
+             WHERE m.conversationId = c.id AND m.body IS NOT NULL AND length(m.body) > 0) AS msgCount
+    FROM conversations c
+    WHERE c.type = 'group' AND c.active_at IS NOT NULL
+    ORDER BY c.active_at DESC`);
+  if (args.json) {
+    const out = rows.map((c) => ({
+      id: c.id,
+      name: (c.name && c.name.trim()) || "(unnamed group)",
+      members: memberCount(c.members),
+      msgCount: c.msgCount,
+      lastActive: c.active_at ? new Date(c.active_at).toISOString() : null,
+    }));
+    console.log(JSON.stringify(out, null, 2));
+    return;
+  }
+  for (const c of rows) {
+    const when = c.active_at ? new Date(c.active_at).toISOString().slice(0, 10) : "—";
+    const name = ((c.name && c.name.trim()) || "(unnamed group)").padEnd(28);
+    console.log(`${String(c.msgCount).padStart(5)}  ${when}  ${name}  ${String(memberCount(c.members)).padStart(3)} mem  [${c.id}]`);
+  }
+  console.error(`\n${rows.length} groups.`);
+}
+
 function cmdList(args = {}) {
+  if (args.groups) return cmdListGroups(args);
   const rows = query(`
     SELECT c.id, c.name, c.profileFullName,
            json_extract(c.json,'$.systemGivenName') AS systemGivenName,
@@ -196,15 +234,30 @@ function cmdList(args = {}) {
 
 function resolveConversation(args) {
   if (args.id) {
-    const r = query(`SELECT id, name, profileFullName,
-        json_extract(json,'$.systemGivenName') AS systemGivenName, e164
+    const r = query(`SELECT id, type, name, profileFullName,
+        json_extract(json,'$.systemGivenName') AS systemGivenName, e164, members
         FROM conversations WHERE id = '${args.id.replace(/'/g, "''")}'`);
     if (!r.length) throw new Error(`no conversation with id ${args.id}`);
     return r[0];
   }
+  if (args.group) {
+    if (args.group === true) throw new Error('--group needs a name substring, e.g. read --group "MakeLab"');
+    const needle = String(args.group).replace(/'/g, "''").toLowerCase();
+    const r = query(`SELECT id, type, name, members, active_at
+        FROM conversations
+        WHERE type='group' AND lower(name) LIKE '%${needle}%'
+        ORDER BY active_at DESC`);
+    if (!r.length) throw new Error(`no group matching "${args.group}"`);
+    if (r.length > 1) {
+      console.error(`Multiple groups matching "${args.group}":`);
+      for (const c of r) console.error(`  - ${(c.name || "(unnamed group)")} [${c.id}]`);
+      console.error(`Refine --group or use --id.`);
+    }
+    return r[0];
+  }
   if (args.name) {
     const needle = args.name.replace(/'/g, "''").toLowerCase();
-    const r = query(`SELECT id, name, profileFullName,
+    const r = query(`SELECT id, type, name, profileFullName,
         json_extract(json,'$.systemGivenName') AS systemGivenName, e164, active_at
         FROM conversations
         WHERE type='private' AND (
@@ -220,19 +273,34 @@ function resolveConversation(args) {
     }
     return r[0];
   }
-  throw new Error("specify --name <substr> or --id <conv-id>");
+  throw new Error("specify --name <substr>, --group <substr>, or --id <conv-id>");
 }
+
+// Resolve a group message's sender ACI (messages.sourceServiceId) to a display
+// name via the contact's own conversations row (matched on serviceId). Written
+// as a CORRELATED SUBQUERY, not a JOIN: a LEFT JOIN would duplicate the message
+// row if two conversation rows ever shared a serviceId (a merged/duplicate
+// contact) — the subquery is one-in-one-out by construction. Precedence mirrors
+// displayName(): name → profileFullName → systemGivenName → e164 → raw ACI.
+const SENDER_SUBQUERY = `(
+  SELECT COALESCE(
+    NULLIF(TRIM(s.name), ''), NULLIF(TRIM(s.profileFullName), ''),
+    json_extract(s.json, '$.systemGivenName'), s.e164, m.sourceServiceId)
+  FROM conversations s WHERE s.serviceId = m.sourceServiceId LIMIT 1)`;
 
 function fetchMessages(convId, limit) {
   const lim = limit ? `LIMIT ${parseInt(limit, 10)}` : "";
-  // type: 'outgoing' = me (Nick), 'incoming' = them.
+  // type: 'outgoing' = me (Nick), 'incoming' = them. `sender` resolves the
+  // individual author for GROUP reads; it's ignored on 1:1 output (which uses
+  // ME/THEM) but harmless to carry.
   return query(`
-    SELECT type, body, sent_at, received_at
-    FROM messages
-    WHERE conversationId = '${convId.replace(/'/g, "''")}'
-      AND type IN ('incoming','outgoing')
-      AND body IS NOT NULL AND length(body) > 0
-    ORDER BY COALESCE(sent_at, received_at) ASC ${lim}`);
+    SELECT m.type, m.body, m.sent_at, m.received_at,
+           ${SENDER_SUBQUERY} AS sender
+    FROM messages m
+    WHERE m.conversationId = '${convId.replace(/'/g, "''")}'
+      AND m.type IN ('incoming','outgoing')
+      AND m.body IS NOT NULL AND length(m.body) > 0
+    ORDER BY COALESCE(m.sent_at, m.received_at) ASC ${lim}`);
 }
 
 function cmdRead(args) {
@@ -242,11 +310,21 @@ function cmdRead(args) {
     console.log(JSON.stringify({ conversation: { id: conv.id, name: displayName(conv), e164: conv.e164 }, messages: msgs }, null, 2));
     return;
   }
-  console.error(`# ${displayName(conv)}  (${conv.e164 || conv.id}) — ${msgs.length} messages\n`);
+  const isGroup = conv.type === "group";
+  const header = isGroup
+    ? `# ${displayName(conv)}  (group, ${memberCount(conv.members)} members) — ${msgs.length} messages`
+    : `# ${displayName(conv)}  (${conv.e164 || conv.id}) — ${msgs.length} messages`;
+  console.error(header + "\n");
+  // In a GROUP, an incoming message can be from any member, so label it with the
+  // resolved sender name (from fetchMessages' SENDER_SUBQUERY); outgoing is still
+  // "ME". In a 1:1 the counterparty is fixed, so keep the terse ME/THEM.
   for (const m of msgs) {
-    const who = m.type === "outgoing" ? "ME " : "THEM";
+    const who = m.type === "outgoing" ? "ME" : (isGroup ? (m.sender || "?") : "THEM");
     const ts = new Date(m.sent_at || m.received_at).toISOString().slice(0, 16).replace("T", " ");
-    console.log(`[${ts}] ${who}: ${m.body.replace(/\n/g, "\n            ")}`);
+    // Pad the speaker column so bodies line up; group names vary in width.
+    const label = isGroup ? who.padEnd(16).slice(0, 16) : who.padEnd(4);
+    const indent = " ".repeat(ts.length + 3 + (isGroup ? 16 : 4) + 2);
+    console.log(`[${ts}] ${label}: ${m.body.replace(/\n/g, "\n" + indent)}`);
   }
 }
 
