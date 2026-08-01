@@ -9,6 +9,19 @@
       "play": {
         "package": "cc.example.my_app",
         "key": "~/keystores/myapp-play-publisher-sa.json"
+      },
+      "preflight": {
+        "urls": {
+          "privacy": "https://example.com/privacy",
+          "terms": "https://example.com/terms",
+          "marketing": "https://example.com"
+        },
+        "well_known_host": "https://example.com",
+        "repo": "~/git/myapp",
+        "required_keys": {
+          "macos_plist": ["LSApplicationCategoryType"],
+          "ios_plist": ["ITSAppUsesNonExemptEncryption"]
+        }
       }
     },
     "otherapp": {

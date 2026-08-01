@@ -56,6 +56,7 @@ import urllib.request
 # the shared config loader imports regardless of how the CLI was invoked.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _appconfig  # noqa: E402
+import preflight  # noqa: E402
 
 # Set once at runtime from the selected app's config (see main()).
 BUNDLE_ID = None
@@ -404,6 +405,52 @@ def mas_release(args):
     print("RELEASE staged. Next: mas-screenshot (as needed), then mas-submit --confirm.")
 
 
+def _asc_build_result():
+    """Check 1 (automatable part): the latest build number ASC already has, so
+    the caller can confirm their next upload uses a fresh one. Best-effort —
+    missing creds/network degrade to MANUAL, they never abort the URL checks."""
+    try:
+        cfg = _cfg()
+        aid = _app_id(cfg)
+        blds = _get(cfg, f"/v1/builds?filter[app]={aid}&limit=1&sort=-version").get("data", [])
+        if blds:
+            v = blds[0]["attributes"].get("version")
+            return preflight.Result("build:latest-asc", preflight.INFO,
+                                    f"latest ASC build = {v}; next upload must use a fresh number")
+        return preflight.Result("build:latest-asc", preflight.WARN, "no builds visible yet")
+    except SystemExit as e:  # _cfg()/_app_id() exit on missing creds/app record
+        return preflight.Result("build:latest-asc", preflight.MANUAL, f"could not query ASC: {e}")
+    except Exception as e:
+        return preflight.Result("build:latest-asc", preflight.MANUAL,
+                                f"could not query ASC: {type(e).__name__}: {e}")
+
+
+def preflight_cmd(args):
+    """Audit iOS/macOS submission preconditions (see preflight.py + the spec)."""
+    name, pf = preflight.get_config(args.app)
+    repo = preflight.resolve_repo(pf, getattr(args, "repo", None))
+    results = []
+    # 1 · fresh build number (automatable) + the fix-is-in-the-artifact human gate
+    results.append(_asc_build_result())
+    results.append(preflight.Result("build:fix-in-artifact", preflight.WARN,
+        "confirm the intended fix SHA is in the built artifact, not merely on main"))
+    # 2 · every metadata URL resolves 200
+    results += preflight.check_urls(pf.get("urls"))
+    # 3 · AASA served + the on-device passkey gate (sole ingress)
+    results.append(preflight.check_aasa(pf.get("well_known_host")))
+    results.append(preflight.Result("passkey:on-device", preflight.MANUAL,
+        "vs prod on the target platform: tap 'Create a passkey' (not Sign in) on a "
+        "fresh device, authenticate, confirm you reach the chat"))
+    # 4 · submit capability (per-account constant)
+    results.append(preflight.Result("submit:capability", preflight.INFO,
+        "iOS/macOS submit via ASC API (asc mas-submit --confirm)"))
+    # 5 · platform-required Info.plist keys
+    rk = pf.get("required_keys", {})
+    results += preflight.check_plist_keys(repo, "macos/Runner/Info.plist", rk.get("macos_plist", []))
+    results += preflight.check_plist_keys(repo, "ios/Runner/Info.plist", rk.get("ios_plist", []))
+    sys.exit(preflight.emit("asc", name, results))
+
+
 def main():
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -429,6 +476,10 @@ def main():
     sm = sub.add_parser("mas-submit"); sm.add_argument("--confirm", action="store_true")
     rl = sub.add_parser("mas-release")
     rl.add_argument("--repo", default="."); rl.add_argument("--version", default=None)
+    pf = sub.add_parser("preflight")
+    pf.add_argument("--repo", default=None,
+                    help="flutter project root for Info.plist checks "
+                         "(else preflight.repo in the app config)")
     args = p.parse_args()
 
     # Resolve the selected app's Apple config into the runtime constants.
@@ -441,7 +492,8 @@ def main():
      "upload": upload, "mas-status": mas_status, "mas-package": mas_package,
      "mas-upload": mas_upload, "mas-attach": mas_attach,
      "mas-mirror-metadata": mas_mirror_metadata, "mas-screenshot": mas_screenshot,
-     "mas-submit": mas_submit, "mas-release": mas_release}[args.cmd](args)
+     "mas-submit": mas_submit, "mas-release": mas_release,
+     "preflight": preflight_cmd}[args.cmd](args)
 
 
 if __name__ == "__main__":

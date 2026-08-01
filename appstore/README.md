@@ -69,3 +69,43 @@ gplay upload --aab app.aab --track internal --notes "…"
 Both tools keep the distribution-safety discipline from their origin: the
 irreversible Apple submit requires `--confirm`, and `gplay upload` commits as a
 Console **draft** (`changesNotSentForReview=true`) rather than auto-submitting.
+
+## Preflight — audit submission preconditions before you submit
+
+```bash
+asc   --app aiko preflight     # iOS/macOS preconditions
+gplay --app aiko preflight     # Android preconditions
+```
+
+`preflight` is the automated form of the pre-submission checklist: every rejection
+at the 2026-07 launch came from a precondition that was true on `main` but not in
+the submitted artifact or on the live platform. It audits five things — metadata
+URLs resolve 200, the well-known auth files carry the right relations (Apple AASA
+served; Android `assetlinks.json` has **both** `get_login_creds` and
+`handle_all_urls` — read directly, because Google's own checker can stay green
+while one is missing), platform-required `Info.plist` keys are present, the live
+build/version number (so your next upload uses a fresh one), and the per-platform
+submit capability.
+
+**Fail-closed:** it exits nonzero if any hard check fails, so it can gate a submit
+in a script. `WARN`/`MANUAL`/`INFO` items (the on-device passkey test, "is the fix
+SHA in the built artifact", the Play Console "Send for review" click) print but
+never flip the exit — the human gates the automation can't close.
+
+Add a `preflight` block per app in `apps.json` (see `apps.example.json`):
+
+```json
+"preflight": {
+  "urls": { "privacy": "https://…/privacy", "terms": "https://…/terms", "marketing": "https://…" },
+  "well_known_host": "https://chat.example.com",
+  "repo": "~/git/myapp",
+  "required_keys": {
+    "macos_plist": ["LSApplicationCategoryType"],
+    "ios_plist":   ["ITSAppUsesNonExemptEncryption"]
+  }
+}
+```
+
+The `Info.plist` checks read from `repo` (or `--repo PATH`); every URL key is
+checked, not just the well-known ones, so a required `account-deletion` URL is
+covered too.

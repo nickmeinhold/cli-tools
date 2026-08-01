@@ -26,6 +26,7 @@ import sys
 # the shared config loader imports regardless of how the CLI was invoked.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _appconfig  # noqa: E402
+import preflight  # noqa: E402
 
 from google.oauth2 import service_account  # noqa: E402
 from googleapiclient.discovery import build  # noqa: E402
@@ -177,6 +178,54 @@ def listing(args):
         raise
 
 
+def _play_version_result():
+    """Check 1 (automatable part): the live production versionCode(s), so the
+    caller can confirm the next AAB uses a higher one. The +8 reuse that shipped
+    an already-fixed bug twice is exactly what this surfaces. Best-effort —
+    missing creds/network degrade to MANUAL."""
+    try:
+        svc = _svc()
+        edit = svc.edits().insert(packageName=PACKAGE, body={}).execute()
+        eid = edit["id"]
+        try:
+            t = svc.edits().tracks().get(
+                packageName=PACKAGE, editId=eid, track="production").execute()
+        finally:
+            svc.edits().delete(packageName=PACKAGE, editId=eid).execute()
+        vcs = []
+        for r in t.get("releases", []):
+            vcs += r.get("versionCodes", []) or []
+        if vcs:
+            return preflight.Result("version:production", preflight.INFO,
+                f"live production versionCode(s) = {vcs}; next AAB must exceed and carry the fix")
+        return preflight.Result("version:production", preflight.WARN, "no production release yet")
+    except Exception as e:
+        return preflight.Result("version:production", preflight.MANUAL,
+                                f"could not query Play: {type(e).__name__}: {e}")
+
+
+def preflight_cmd(args):
+    """Audit Android submission preconditions (see preflight.py + the spec)."""
+    name, pf = preflight.get_config(args.app)
+    results = []
+    # 1 · fresh versionCode (automatable) + the fix-is-in-the-AAB human gate
+    results.append(_play_version_result())
+    results.append(preflight.Result("version:fix-in-artifact", preflight.WARN,
+        "confirm the fix SHA is in the built AAB, not merely on main"))
+    # 2 · every metadata URL resolves 200
+    results += preflight.check_urls(pf.get("urls"))
+    # 3 & 5 · assetlinks BOTH relations (passkey sole ingress + App Links)
+    results += preflight.check_assetlinks(pf.get("well_known_host"))
+    results.append(preflight.Result("passkey:on-device", preflight.MANUAL,
+        "vs prod on-device: tap 'Create a passkey' (not Sign in) on a fresh "
+        "device, authenticate, confirm you reach the chat"))
+    # 4 · submit capability — Play is Console-only for this account
+    results.append(preflight.Result("submit:capability", preflight.INFO,
+        "Android: Play Console only — API commits a DRAFT (changesNotSentForReview); "
+        "click 'Send for review' in the Console after gplay upload"))
+    sys.exit(preflight.emit("gplay", name, results))
+
+
 def main():
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -202,6 +251,7 @@ def main():
     ls.add_argument("--icon", default="")
     ls.add_argument("--feature", default="")
     ls.add_argument("--screenshots", default="")  # comma-separated, in order
+    sub.add_parser("preflight")
     args = p.parse_args()
 
     # Resolve the selected app's Play config into the runtime constants.
@@ -211,7 +261,7 @@ def main():
     KEY = os.path.expanduser(play["key"])
 
     {"verify": verify, "status": status, "upload": upload, "notes": notes,
-     "listing": listing}[args.cmd](args)
+     "listing": listing, "preflight": preflight_cmd}[args.cmd](args)
 
 
 if __name__ == "__main__":
