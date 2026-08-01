@@ -23,6 +23,10 @@ const SCOPES = [
   // for the REST API but Google gates raw IMAP behind https://mail.google.com/.
   "https://mail.google.com/",
   "https://www.googleapis.com/auth/gmail.modify",
+  // Manage send-as aliases (create/verify "Send mail as" identities). basic =
+  // same-domain aliases; sharing = external addresses on another domain.
+  "https://www.googleapis.com/auth/gmail.settings.basic",
+  "https://www.googleapis.com/auth/gmail.settings.sharing",
   "https://www.googleapis.com/auth/calendar",
   "https://www.googleapis.com/auth/drive",
 ];

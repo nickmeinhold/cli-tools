@@ -415,6 +415,72 @@ const COMMANDS = {
       out(res.data);
     },
   },
+
+  // "Send mail as" aliases — the verified From identities the `send`/`create-draft`
+  // `--from` flag draws on. Managing these needs the gmail.settings.basic (same-domain)
+  // and gmail.settings.sharing (external addresses) scopes; if these commands 403,
+  // re-run `gmail auth` to grant the newly-added scopes to the stored token.
+  "list-send-as": {
+    help: "List all 'Send mail as' aliases with verification status",
+    opts: {},
+    async run() {
+      const gmail = await gmailClient();
+      const res = await gmail.users.settings.sendAs.list({ userId: "me" });
+      // verificationStatus is 'accepted' | 'pending'; isPrimary marks the real mailbox
+      // address (always usable). Only accepted aliases can actually be sent as.
+      out(res.data.sendAs || []);
+    },
+  },
+
+  "create-send-as": {
+    help:
+      "Add a 'Send mail as' alias. --email addr [--name DISPLAY --reply-to addr --treat-as-alias]. " +
+      "An external address stays 'pending' until you click the verification email Gmail sends.",
+    opts: {
+      email: { type: "string" },
+      name: { type: "string" },
+      "reply-to": { type: "string" },
+      "treat-as-alias": { type: "boolean" },
+    },
+    required: ["email"],
+    async run({ email, name, replyTo, treatAsAlias }) {
+      const gmail = await gmailClient();
+      const res = await gmail.users.settings.sendAs.create({
+        userId: "me",
+        requestBody: {
+          sendAsEmail: email,
+          ...(name ? { displayName: name } : {}),
+          ...(replyTo ? { replyToAddress: replyTo } : {}),
+          ...(treatAsAlias !== undefined ? { treatAsAlias } : {}),
+        },
+      });
+      // For an external address the response comes back verificationStatus:'pending' —
+      // surface that so the caller knows a verification click is still required.
+      out(res.data);
+    },
+  },
+
+  "verify-send-as": {
+    help: "(Re)send the verification email for a pending 'Send mail as' alias. --email addr",
+    opts: { email: { type: "string" } },
+    required: ["email"],
+    async run({ email }) {
+      const gmail = await gmailClient();
+      await gmail.users.settings.sendAs.verify({ userId: "me", sendAsEmail: email });
+      out({ status: "verification-sent", email });
+    },
+  },
+
+  "delete-send-as": {
+    help: "Remove a 'Send mail as' alias (cannot remove the primary address). --email addr",
+    opts: { email: { type: "string" } },
+    required: ["email"],
+    async run({ email }) {
+      const gmail = await gmailClient();
+      await gmail.users.settings.sendAs.delete({ userId: "me", sendAsEmail: email });
+      out({ status: "deleted", email });
+    },
+  },
 };
 
 await runDispatcher("gmail", COMMANDS);
