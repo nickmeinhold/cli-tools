@@ -254,6 +254,13 @@ A nightly cross-repo **surprise engine** — scans a fleet of git repos and meas
 node parallax/parallax.mjs scan --json
 ```
 
+### appstore
+App-agnostic distribution CLIs for **Apple App Store Connect** (`asc.py` — iOS TestFlight + the full Mac App Store package→upload→attach→submit pipeline) and **Google Play** (`gplay.py` — AAB upload, release notes, store listing). No app identifiers are hardcoded: each command's target comes from a per-app config (`~/.config/appstore/apps.json`, see `appstore/apps.example.json`) selected via `--app`/`$APPSTORE_APP`/`default`. Keeps distribution-safety discipline — Apple submit is fail-closed behind `--confirm`, Play upload commits a Console draft. Python 3.10+; `pip install -r appstore/requirements.txt`.
+```bash
+asc --help    # after: ln -sf "$PWD/appstore/asc.py" ~/.local/bin/asc
+gplay --help  # after: ln -sf "$PWD/appstore/gplay.py" ~/.local/bin/gplay
+```
+
 ### lib
 Shared Playwright plumbing (`browser-context.mjs`) used by the browser-driven
 messaging tools. Not a standalone tool.

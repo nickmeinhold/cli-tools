@@ -1,0 +1,7 @@
+# asc.py (Apple App Store Connect)
+PyJWT>=2.8
+cryptography>=42        # ES256 signing backend for PyJWT
+
+# gplay.py (Google Play Developer API)
+google-api-python-client>=2.100
+google-auth>=2.23

@@ -1,0 +1,21 @@
+{
+  "default": "aiko",
+  "apps": {
+    "aiko": {
+      "asc": {
+        "bundle_id": "cc.example.myApp",
+        "env": "~/keystores/myapp-asc.env"
+      },
+      "play": {
+        "package": "cc.example.my_app",
+        "key": "~/keystores/myapp-play-publisher-sa.json"
+      }
+    },
+    "otherapp": {
+      "asc": {
+        "bundle_id": "co.example.otherApp",
+        "env": "~/keystores/otherapp-asc.env"
+      }
+    }
+  }
+}
