@@ -7,7 +7,7 @@
     "whatsapp-cli": "./whatsapp.mjs"
   },
   "dependencies": {
-    "baileys": "^7.0.0-rc13",
+    "baileys": "^7.0.0-rc14",
     "pino": "^9.0.0",
     "qrcode-terminal": "^0.12.0"
   }
