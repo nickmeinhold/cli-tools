@@ -1229,6 +1229,7 @@ async function main() {
 
   if (!network || network === "help") {
     console.error(`social <network> <command> [--limit N] [--out FILE] [--json] [--headed]
+Harvests/discovers many people; distinct from augur (which digs ONE person deeply).
 networks: ${Object.keys(BACKENDS).join(", ")}
 harvest (roster/attendees):
   linkedin connections   facebook friends   meetup members --group X   luma guests --event Y
@@ -1240,14 +1241,14 @@ events (create/manage across luma + meetup — folded in from events-mcp):
   luma change-photo --event evt-… (--search tech | --category Tech | --file /abs.jpg)
   luma delete --event evt-…
   meetup list --group X [--past]              list a group's upcoming (or past) events
-  meetup create --group X --title X --date 2026-07-19 --description "…" [--start-time --end-time --venue-id --publish]
+  meetup create --group X --title X --date 2026-07-19 --description "…" [--start-time --end-time --venue-id --publish]  (needs --date+--description; private DRAFT unless --publish. Luma has no draft — create is live)
   meetup edit --group X --event <id> [--title --description --date --start-time --end-time --venue-id]  (read-modify-write; preserves untouched fields)
   meetup delete --group X --event <id>
   meetup messages [--limit N]                your DM inbox (read-only)
   meetup messages --convo <id>               read one conversation thread
   meetup dm (--member <id> | --name "X") --text "…" --confirm   send ONE 1:1 DM (draft-gated)
   sync --from <event-url> --to luma|meetup [--group X] [--publish]   mirror an event across platforms
-discover (find people NOT yet in the social graph):
+discover (find people NOT yet in the social graph — results are LEADS not nodes; consent-gate before adding):
   social discover github      2nd-degree builder-graph crawl (who your people follow)
   social discover messaging   1st-degree Signal + Discord + Telegram DM diff
   social discover groups       group co-occurrence (who shares your Telegram groups)`);

@@ -406,6 +406,13 @@ async function cmdCommands(args) {
 
 function cmdSetup() {
   log(`
+mj — fire Midjourney's /imagine in your Discord server, download the PNGs, and
+hand the pixels back to Claude via Read. Not an official bot: MJ has no API and
+a Discord bot can't invoke another bot's slash command, so this uses a USER
+token (self-bot, against ToS — Nick's explicit risk-aware call).
+Loop: imagine "<prompt>" --channel <id> → grid → upscale/vary --message <gridId> --index N.
+⚠ BLAST-RADIUS: every imagine/upscale/vary spends an MJ credit — cap autonomous loops.
+
 mj setup — one-time
   1. DISCORD_USER_TOKEN (self-bot; your Midjourney account):
      Discord in a browser → DevTools (Cmd+Opt+I) → Network tab → filter "science"

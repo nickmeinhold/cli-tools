@@ -65,6 +65,11 @@ function help() {
 
 Usage: playwright <subcommand> [options]
 
+Headed-browser automation for sites without a clean API. Also the auth-bridge
+front-door: \`auth\` does the interactive login (human hands: password + 2FA) and
+saves a session that eval/recipes — and sibling CLIs like messenger/instagram/
+linkedin — reuse.
+
 Auth: storageState JSON files at ${TOKEN_DIR}/
 First-time setup: \`playwright auth --site URL --name LABEL\`
 

@@ -611,10 +611,12 @@ function dashToCamel(s) {
 }
 
 function printHelp() {
-  console.log("kan — CLI for kan.bn\n\nUsage: kan [--site NAME] <subcommand> [options]\n");
+  console.log("kan — CLI for kan.bn kanban (workspaces/boards/cards/lists/labels/members/invites)\n\nUsage: kan [--site NAME] <subcommand> [options]\n");
+  console.log("Instances: imagineering (default) + xdeca. Pick with --site NAME.");
   console.log("Multi-instance: --site NAME reads KAN_<NAME>_API_KEY / KAN_<NAME>_BASE_URL");
   console.log("  (e.g. --site xdeca → KAN_XDECA_API_KEY). $KAN_DEFAULT_SITE sets the site used");
-  console.log("  when --site is omitted; otherwise falls back to bare $KAN_API_KEY / $KAN_BASE_URL.\n");
+  console.log("  when --site is omitted; otherwise falls back to bare $KAN_API_KEY / $KAN_BASE_URL.");
+  console.log("Setup: add the keys to ~/.claude/.env and `source` it.\n");
   console.log("Subcommands:");
   for (const [name, cmd] of Object.entries(COMMANDS)) {
     console.log(`  ${name.padEnd(24)} ${cmd.help}`);

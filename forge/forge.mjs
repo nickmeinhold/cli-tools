@@ -160,9 +160,9 @@ function dashToCamel(s) {
 }
 
 function printHelp() {
-  console.log("forge — CLI for the forge sprint state store\n");
+  console.log("forge — generator-evaluator sprint state store with trajectory analysis (plateau/oscillation/regression)\n");
   console.log("Usage: forge <subcommand> [options]\n");
-  console.log("State: ./.forge/ (per-project, preferred) or ~/.forge/ (global)\n");
+  console.log("State: ./.forge/ (per-project, preferred) or ~/.forge/ (global). Global tooling — invoke from any repo.\n");
   console.log("Subcommands:");
   for (const [name, cmd] of Object.entries(COMMANDS)) {
     console.log(`  ${name.padEnd(18)} ${cmd.help}`);

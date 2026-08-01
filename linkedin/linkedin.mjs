@@ -444,6 +444,7 @@ WHY BROWSER-BACKED (not a protocol/API client):
   LinkedIn has no supported messaging API, and its internal Voyager REST endpoint now 500s
   (DMs moved to a GraphQL endpoint with a rotating queryId). Reading the rendered SPA's DOM is
   the durable path. Reuses the existing Playwright "linkedin" session — no separate login.
+  DISTINCT FROM \`social\` (which only harvests the connection roster).
   Session: ${STORAGE}`);
 }
 

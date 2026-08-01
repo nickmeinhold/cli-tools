@@ -166,6 +166,10 @@ AUTH — two paths, tried in order (NO setup needed for path 2):
 WHY / WHEN TO USE
   Reads/searches/posts as Nick in a Slack workspace. Path 2 needs nothing set
   up — if the desktop app is signed in, the CLI just works.
+  Token type is the capability boundary: a USER token (xoxp-) acts as Nick,
+  sees every channel/DM he's in, and is the ONLY kind that can \`search\`; a
+  BOT token (xoxb-) only sees invited channels and can't search.
+  GOTCHA: Slack returns HTTP 200 even on failure (real status is in body.ok).
 
 SETUP for path 1 only (optional, ~3 min): see header of this file —
   api.slack.com/apps → Create App → OAuth & Permissions → User Token Scopes

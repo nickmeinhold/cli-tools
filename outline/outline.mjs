@@ -397,8 +397,9 @@ const COMMANDS = {
 // ─────────────────────────── dispatcher ───────────────────────────
 
 function usage() {
-  console.log("outline — CLI for the Outline API\n");
+  console.log("outline — CLI for the Outline wiki API (RPC-over-POST; subcommands mirror the API verbs)\n");
   console.log("Usage: outline [--site NAME] <subcommand> [options]\n");
+  console.log("Instances: xdeca (default) + imagineering. Pick with --site NAME.");
   console.log("Multi-instance: --site NAME reads OUTLINE_<NAME>_API_KEY / OUTLINE_<NAME>_API_URL");
   console.log("  (e.g. --site imagineering → OUTLINE_IMAGINEERING_API_KEY). $OUTLINE_DEFAULT_SITE");
   console.log("  sets the site used when --site is omitted; otherwise falls back to bare");

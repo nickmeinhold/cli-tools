@@ -540,7 +540,8 @@ function fail(msg) {
   process.exit(1);
 }
 
-const HELP = `radicale — CalDAV CLI for Radicale
+const HELP = `radicale — self-hosted CalDAV/CardDAV CLI for Radicale
+  Calendars+events AND address books+contacts. DISTINCT FROM \`gcal\` (which is Google).
 
 USAGE
   radicale <command> [--site imagineering|xdeca] [options]

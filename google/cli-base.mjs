@@ -17,8 +17,14 @@ export async function runDispatcher(toolName, COMMANDS) {
     const longName = { gmail: "Gmail", gcal: "Calendar", gdrive: "Drive" }[toolName] || toolName;
     console.log(`${toolName} — CLI for Google ${longName}\n`);
     console.log(`Usage: ${toolName} <subcommand> [options]\n`);
-    console.log(`Auth: OAuth refresh token at ~/git/tools/cli-tools/.tokens/google.json.`);
+    console.log(`Auth: OAuth refresh token at ~/git/tools/cli-tools/.tokens/google.json (shared across gmail/gcal/gdrive).`);
     console.log(`First-time setup: source ~/.claude/.env then run \`${toolName} auth\`\n`);
+    const TIPS = {
+      gmail: "Attachments via --attach FILE (UTF-8 body base64'd so Unicode survives). OAuth shared with gcal.",
+      gdrive: "HTML/markdown converts to a native Google Doc via the two-mime-type upload.",
+      gcal: "list/create/update/delete events, respond-to-invite, suggest-time via FreeBusy. DISTINCT FROM `radicale` (self-hosted CalDAV, not Google).",
+    }[toolName];
+    if (TIPS) console.log(`Note: ${TIPS}\n`);
     console.log("Subcommands:");
     for (const [name, cmd] of Object.entries(COMMANDS)) {
       console.log(`  ${name.padEnd(22)} ${cmd.help}`);

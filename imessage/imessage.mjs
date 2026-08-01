@@ -226,7 +226,8 @@ function help() {
 WHY / WHEN TO USE
   TWO asymmetric paths (mirrors \`signal\`). READ is passive: queries the local
   ~/Library/Messages/chat.db directly (needs Full Disk Access for the terminal,
-  one-time). WRITE is active: drives Messages.app via osascript — macOS has no
+  one-time; decodes attributedBody where text is NULL on newer macOS). WRITE is
+  active: drives Messages.app via osascript — macOS has no
   send API, so we automate the real client, same as whatsapp/messenger/signal.
   First send pops a one-time Automation prompt (Nick's hands).
 

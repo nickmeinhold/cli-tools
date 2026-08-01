@@ -95,9 +95,12 @@ SOCKET MODE (needs Blender open + MCP server started, port ${PORT}):
   raw         Any command.  --type CMD [--params JSON]
   ping        Check the socket is reachable
 
-HEADLESS MODE (no running Blender; reproducible batch):
+HEADLESS MODE (no running Blender; reproducible batch — prefer for GLB/blendshape work):
   headless    blender --background [--blend FILE] --python <script>
               --file PATH | --code STR  [--blend FILE] [-- passthrough args]
+
+Socket mode drives a LIVE Blender (must be open with the MCP server started);
+headless mode spawns its own Blender and needs nothing running.
 
 Env: BLENDER_BIN (default 'blender')`;
 
