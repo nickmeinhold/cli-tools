@@ -995,7 +995,13 @@ async function harvestLumaEdit(page, opts) {
   if (!id) return { error: "pass --event evt-… (or --url <manage url>) and at least one field to change" };
   const changed = ["title", "description", "start", "start-time", "end-time", "location", "location-json"]
     .filter((k) => typeof opts[k] === "string" && opts[k]);
-  if (!changed.length) return { error: "no fields changed — pass --title/--description/--start/--start-time/--end-time/--location" };
+  // --public / --private / --visibility <public|private> flips the listing state.
+  const wantVis = opts.public === true ? "public"
+    : opts.private === true ? "private"
+    : (typeof opts.visibility === "string" && opts.visibility ? String(opts.visibility).toLowerCase() : null);
+  if (wantVis && wantVis !== "public" && wantVis !== "private") return { error: `--visibility must be "public" or "private" (got "${wantVis}")` };
+  if (wantVis) changed.push(`visibility=${wantVis}`);
+  if (!changed.length) return { error: "no fields changed — pass --title/--description/--start/--start-time/--end-time/--location/--public/--private" };
 
   const got = await lumaApi(page, `/event/admin/get?event_api_id=${encodeURIComponent(id)}`);
   const ev = got.event;
@@ -1030,6 +1036,7 @@ async function harvestLumaEdit(page, opts) {
     theme_meta: ev.theme_meta ?? { theme: "legacy" },
     timezone: tz,
     tint_color: ev.tint_color ?? "#fcedd4",
+    visibility: wantVis ?? ev.visibility ?? "public",
     zoom_meeting_id: null, zoom_meeting_password: null, zoom_meeting_url: null,
   };
   const res = await lumaApi(page, "/event/admin/update", payload);
@@ -1038,6 +1045,7 @@ async function harvestLumaEdit(page, opts) {
   if (after.name !== payload.name) mismatch.push(`name "${after.name}" ≠ "${payload.name}"`);
   if (after.start_at !== payload.start_at) mismatch.push(`start_at ${after.start_at} ≠ ${payload.start_at}`);
   if (after.end_at !== endAt.toISOString()) mismatch.push(`end_at ${after.end_at} ≠ ${endAt.toISOString()}`);
+  if (after.visibility !== payload.visibility) mismatch.push(`visibility "${after.visibility}" ≠ "${payload.visibility}"`);
   if (mismatch.length) return { error: `update of ${id} did not stick: ${mismatch.join("; ")} — inspect https://luma.com/event/manage/${id}` };
   return { records: [{ id, updated: changed, start_at: after.start_at, end_at: after.end_at }], note: `Luma event updated (${changed.join(", ")}, verified): ${id}` };
 }
