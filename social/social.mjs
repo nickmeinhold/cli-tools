@@ -953,7 +953,9 @@ async function harvestLumaCreate(page, opts) {
     calendar_api_id: calId, calendar_to_submit_to_api_id: null,
     grant_manage_access: false, _calendar_requires_manage_access: false,
     supports_members_only: false, max_capacity: null, waitlist_status: "disabled",
-    visibility: "public",
+    // Default public; --private (or --visibility private) makes the event link-only
+    // (unlisted — not shown on the calendar; registration needs the direct link).
+    visibility: opts.private === true || String(opts.visibility || "").toLowerCase() === "private" ? "private" : "public",
     theme_meta: { theme: "legacy" }, tint_color: "#fcedd4", font_title: "roc-grotesk",
     ticket_types: [{ currency: null, type: "free", ethereum_token_requirements: [], cents: null, is_flexible: false, min_cents: null, require_approval: false, is_hidden: false }],
   };
@@ -976,6 +978,7 @@ async function harvestLumaCreate(page, opts) {
   if (ev.start_at !== startAt.toISOString()) mismatch.push(`start_at ${ev.start_at} ≠ ${startAt.toISOString()}`);
   if (ev.end_at !== endAt.toISOString()) mismatch.push(`end_at ${ev.end_at} ≠ ${endAt.toISOString()}`);
   if (loc.geo && rec.location !== loc.geo.address) mismatch.push(`location "${rec.location}" ≠ "${loc.geo.address}"`);
+  if (ev.visibility !== payload.visibility) mismatch.push(`visibility "${ev.visibility}" ≠ "${payload.visibility}"`);
   if (mismatch.length) return { error: `event ${created.api_id} WAS created but readback mismatched: ${mismatch.join("; ")} — inspect ${rec.manage} (or \`luma delete --event ${created.api_id}\`)`, records: [rec] };
   return { records: [rec], note: `Event created (verified): ${rec.url} (manage: ${rec.manage})` };
 }
@@ -1236,7 +1239,7 @@ harvest (roster/attendees):
   social auth <network>   social networks
 events (create/manage across luma + meetup — folded in from events-mcp):
   luma list [--past]                         list your upcoming (or --past) Luma events
-  luma create --title X --start 2026-07-26 --start-time 18:00 [--end-time --location --description --timezone --location-json]
+  luma create --title X --start 2026-07-26 --start-time 18:00 [--end-time --location --description --timezone --location-json --private]  (--private = link-only/unlisted)
   luma edit --event evt-… [--title --description --start --start-time --end-time --location]
   luma change-photo --event evt-… (--search tech | --category Tech | --file /abs.jpg)
   luma delete --event evt-…
