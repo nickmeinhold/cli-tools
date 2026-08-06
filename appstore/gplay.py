@@ -83,15 +83,14 @@ def upload(args):
     svc.edits().tracks().update(
         packageName=PACKAGE, editId=eid, track=args.track,
         body={"track": args.track, "releases": [release]}).execute()
-    # Some accounts require review to be triggered from the Console UI, not the
-    # API: a plain commit 400s with "Changes cannot be sent for review
-    # automatically." changesNotSentForReview=true commits the release as a
-    # DRAFT on the track; a human then clicks "Send for review" in the Console.
-    svc.edits().commit(
-        packageName=PACKAGE, editId=eid,
-        changesNotSentForReview=True).execute()
+    # This account AUTO-SUBMITS: a plain commit sends the release straight to
+    # review. (It formerly required changesNotSentForReview=true to land a DRAFT
+    # for a manual Console "Send for review" click; as of 2026-08-06 the Play API
+    # rejects that flag with "Changes are sent for review automatically. The query
+    # parameter changesNotSentForReview must not be set." — so commit == submit.)
+    svc.edits().commit(packageName=PACKAGE, editId=eid).execute()
     print(f"committed versionCode={vc} to track={args.track} "
-          f"(DRAFT — send for review in Play Console)")
+          f"(SENT FOR REVIEW — this account auto-submits on commit)")
 
 
 def notes(args):
