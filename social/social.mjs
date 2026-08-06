@@ -840,20 +840,27 @@ const isoDuration = (startAt, endAt) => {
   return `PT${Math.floor(min / 60)}H${min % 60 ? `${min % 60}M` : ""}`;
 };
 
-// Resolve --location against the account's suggested locations (Google-place
-// JSON, the shape /event/create expects). No fuzzy geocoding here — an
-// unmatched location is an ERROR, not a silently-unset field.
+// Resolve --location to a Google-place geo_address_json (the shape /event/create
+// expects). get-suggested-locations doubles as a geocoder: with ?query=<q> it
+// returns live Google-Places matches (type:"google", ranked by relevance) for an
+// ARBITRARY address, not just places you've used before. We take the top-ranked
+// hit and surface its full_address on stderr so the attached venue is verifiable
+// (the create/edit readback then diffs it). A query that geocodes to nothing is an
+// ERROR, not a silently-unset field.
 async function lumaResolveLocation(page, opts) {
   if (typeof opts["location-json"] === "string" && opts["location-json"]) {
     try { return { geo: JSON.parse(opts["location-json"]) }; } catch { return { error: "--location-json is not valid JSON" }; }
   }
   const q = typeof opts.location === "string" ? opts.location.trim() : "";
   if (!q) return { geo: null };
-  const sug = await lumaApi(page, "/event/admin/get-suggested-locations");
+  const sug = await lumaApi(page, `/event/admin/get-suggested-locations?query=${encodeURIComponent(q)}`);
+  const locs = sug.locations || [];
+  if (!locs.length) return { error: `--location "${q}" geocoded to nothing (Luma get-suggested-locations returned no matches). Try a fuller address, or pass --location-json '<geo_address_json>'.` };
+  // Prefer a case-insensitive substring hit on address/full_address (keeps the old
+  // saved-suggestion behaviour), else fall back to Google's #1 result for the query.
   const ql = q.toLowerCase();
-  const geo = (sug.locations || []).find((l) =>
-    [l.address, l.full_address].some((a) => String(a || "").toLowerCase().includes(ql)));
-  if (!geo) return { error: `--location "${q}" matched none of your Luma suggested locations (${(sug.locations || []).map((l) => l.address).join(" | ") || "none yet"}). Pick it once in the UI (it becomes a suggestion), or pass --location-json '<geo_address_json>'.` };
+  const geo = locs.find((l) => [l.address, l.full_address].some((a) => String(a || "").toLowerCase().includes(ql))) || locs[0];
+  console.error(`  location "${q}" → ${geo.full_address || geo.address}${locs.length > 1 ? ` (top of ${locs.length} matches)` : ""}`);
   return { geo };
 }
 
@@ -1046,6 +1053,7 @@ async function harvestLumaEdit(page, opts) {
   if (after.start_at !== payload.start_at) mismatch.push(`start_at ${after.start_at} ≠ ${payload.start_at}`);
   if (after.end_at !== endAt.toISOString()) mismatch.push(`end_at ${after.end_at} ≠ ${endAt.toISOString()}`);
   if (after.visibility !== payload.visibility) mismatch.push(`visibility "${after.visibility}" ≠ "${payload.visibility}"`);
+  if (loc.geo && after.geo_address_json?.address !== loc.geo.address) mismatch.push(`location "${after.geo_address_json?.address}" ≠ "${loc.geo.address}"`);
   if (mismatch.length) return { error: `update of ${id} did not stick: ${mismatch.join("; ")} — inspect https://luma.com/event/manage/${id}` };
   return { records: [{ id, updated: changed, start_at: after.start_at, end_at: after.end_at }], note: `Luma event updated (${changed.join(", ")}, verified): ${id}` };
 }
