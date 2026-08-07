@@ -564,7 +564,37 @@ function cmdSend(args) {
   const msgArg = args.text ? ["-m", args.text] : [];
   const attachArg = attachments.length ? ["-a", ...attachments] : [];
   const editArg = isEdit ? ["--edit-timestamp", String(args["edit-to"])] : [];
-  const r = spawnSync("signal-cli", ["send", ...msgArg, ...attachArg, ...mentionArg, ...quote, ...editArg, ...target], { encoding: "utf8" });
+  const sendArgs = ["send", ...msgArg, ...attachArg, ...mentionArg, ...quote, ...editArg, ...target];
+  let r = spawnSync("signal-cli", sendArgs, { encoding: "utf8" });
+
+  // Stale-device recovery, ONE retry, narrowly scoped.
+  //
+  // signal-cli links as its own device. If it hasn't pulled its queue in a
+  // while, the Signal protocol degrades: profile lookups start 404ing and sends
+  // fail outright ("Messages have been last received N days ago" +
+  // "Failed to retrieve profile ... [404] Profile not found"). Draining the
+  // queue fixes it. That recovery used to be manual, i.e. you found out via a
+  // failed send at the worst possible moment.
+  //
+  // Deliberately NOT a pre-send drain: the queue can be thousands of messages
+  // deep, and a working send shouldn't pay that cost. Deliberately NOT a blind
+  // retry either — send is a mutating verb, so anything outside this one known
+  // signature (blocked recipient, unregistered number, bad group id) falls
+  // straight through to the throw rather than being retried into the void.
+  //
+  // Residual risk, accepted and named: if signal-cli ever exits non-zero having
+  // actually delivered, the retry duplicates the message. Not observed — the
+  // failure mode we've seen prints "Failed to send message" and delivers
+  // nothing — but it is the reason this retries once and never loops.
+  const STALE_DEVICE = /Profile not found|Messages have been last received/i;
+  if (r.status !== 0 && STALE_DEVICE.test(r.stderr || "")) {
+    console.error("signal-cli device looks stale (profile lookup failed); draining receive queue and retrying once...");
+    const drain = spawnSync("signal-cli", ["-o", "json", "receive"], { encoding: "utf8" });
+    if (drain.status !== 0)
+      throw new Error(`signal-cli send failed and the recovery receive also failed: ${drain.stderr || drain.stdout}`);
+    r = spawnSync("signal-cli", sendArgs, { encoding: "utf8" });
+  }
+
   if (r.status !== 0) throw new Error(`signal-cli send failed: ${r.stderr || r.stdout}`);
   const note = attachments.length ? ` with ${attachments.length} attachment(s)` : "";
   const editNote = isEdit ? ` (edited message ${args["edit-to"]})` : "";
